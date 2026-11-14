@@ -24,11 +24,14 @@
 
 #include <algorithm>
 
-// La boucle d'exécution est compilée d'un seul bloc (plus rapide, mais la
-// compilation prend alors plusieurs minutes avec GCC). Pour une compilation
-// rapide pendant les tests : -DLMENTS_FLATTEN=
+// La boucle d'exécution est compilée d'un seul bloc (plus rapide). Seulement avec
+// Clang, le compilateur des Mac : GCC met plus de dix minutes à le faire.
 #ifndef LMENTS_FLATTEN
+#if defined(__clang__)
 #define LMENTS_FLATTEN __attribute__((flatten))
+#else
+#define LMENTS_FLATTEN
+#endif
 #endif
 
 namespace lments {

@@ -1,0 +1,49 @@
+# Vérifie la puce virtuelle à chaque envoi (push) ou à la demande
+# (onglet Actions > Tests > Run workflow).
+#
+#   - Linux : les programmes de test sont recompilés pour la puce, exécutés par
+#     l'émulateur et comparés à QEMU (référence) et à l'ordinateur.
+#   - Mac : les mêmes programmes, déjà compilés, sont rejoués sur un Mac Apple
+#     Silicon, en version Apple Silicon puis Intel, et comparés aux mêmes références.
+#
+# La fabrication du plugin et de son installateur s'ajoutera ici à partir de l'étape 2.
+name: Tests
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Comparaison avec QEMU (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Outils (compilateur pour la puce, QEMU)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib qemu-system-arm
+      - name: Tests
+        run: bash tools/armtests/run_tests.sh
+      - name: Les programmes enregistrés donnent le même résultat
+        run: bash tools/armtests/run_prebuilt.sh clang++
+
+  mac:
+    name: Émulateur sur Mac (Apple Silicon et Intel)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compilation (CMake, les deux architectures)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake --build build -j 4
+          lipo -info build/lments_emu_run
+      - name: Tests, version Apple Silicon
+        run: |
+          uname -m
+          sysctl -n machdep.cpu.brand_string
+          bash tools/armtests/run_prebuilt.sh clang++ -arch arm64
+      - name: Tests, version Intel (via Rosetta)
+        run: |
+          softwareupdate --install-rosetta --agree-to-license || true
+          OUT=/tmp/lments-prebuilt-intel bash tools/armtests/run_prebuilt.sh clang++ -arch x86_64

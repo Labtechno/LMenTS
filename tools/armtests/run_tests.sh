@@ -3,8 +3,11 @@
 # exécuté par l'émulateur LMenTS. Ses sorties sont comparées à celles du même
 # code compilé pour l'ordinateur et, si QEMU est installé, à celles de QEMU.
 #
-#   bash run_tests.sh            tous les tests
-#   bash run_tests.sh rapide     sans le test du son d'Elements (le plus long)
+#   bash run_tests.sh              tous les tests
+#   bash run_tests.sh rapide       sans le test du son d'Elements (le plus long)
+#   bash run_tests.sh enregistrer  tous les tests, puis met à jour le dossier prebuilt/
+#                                  (programmes compilés + résultats de référence, pour
+#                                  refaire les comparaisons sur un Mac sans rien installer)
 set -u
 cd "$(dirname "$0")"
 OUT=${OUT:-/tmp/lments-armtests}
@@ -14,9 +17,8 @@ CFLAGS="$ARCH -ffunction-sections -fdata-sections -fno-common -Wall"
 LDFLAGS="-nostartfiles -T link.ld -Wl,--gc-sections --specs=nosys.specs -Wl,--defsym=FLASH_ORIGIN=0"
 fail=0
 
-# -DLMENTS_FLATTEN= : compilation rapide de l'émulateur (même comportement).
 EMU="../../Source/emu"
-g++ -std=c++17 -O2 ${EMUFLAGS:--DLMENTS_FLATTEN=} -ffp-contract=off -o "$OUT/emu_run" ../emu_run.cpp $EMU/CortexM4.cpp $EMU/CortexM4Fpu.cpp || exit 1
+${CXX:-g++} -std=c++17 -O2 -ffp-contract=off -o "$OUT/emu_run" ../emu_run.cpp $EMU/CortexM4.cpp $EMU/CortexM4Fpu.cpp || exit 1
 (cd "$OUT" && python3 "$OLDPWD/gen_flags.py" > gen.log && python3 "$OLDPWD/gen_fp.py" > genfp.log) || exit 1
 
 check() {  # nom, fichier de référence, fichier obtenu
@@ -107,6 +109,19 @@ if [ "${1:-}" != rapide ]; then
   # 3. Pour information : écart de son entre le firmware (avec fusion) et l'ordinateur.
   python3 compare_audio.py "$OUT/elements.native" "$OUT/elements.out"
   grep -o "[0-9.]* M instr/s.*168 MHz" "$OUT/elements.stat" | sed 's/^/  vitesse de cet ordinateur, sans optimisation : /'
+fi
+if [ "${1:-}" = enregistrer ] && [ $fail = 0 ] && [ $HAVE_QEMU = 1 ]; then
+  mkdir -p prebuilt
+  cp "$OUT/arith-O2.bin" prebuilt/arith.bin;     cp "$OUT/arith.ref" prebuilt/arith.ref
+  cp "$OUT/flags.bin" prebuilt/flags.bin;        cp "$OUT/flags.ref" prebuilt/flags.ref
+  cp "$OUT/fp.bin" prebuilt/fp.bin;              cp "$OUT/fp.ref" prebuilt/fp.ref
+  cp "$OUT/irq-O2.bin" prebuilt/irq.bin;         cp "$OUT/irq-O2.ref" prebuilt/irq.ref
+  cp "$OUT/elements.bin" prebuilt/elements.bin;  cp "$OUT/elements.qemu" prebuilt/elements.ref
+  # Le même programme placé à l'adresse de la flash d'un STM32, comme le vrai firmware :
+  # c'est lui qui sert à mesurer la vitesse de l'émulateur.
+  arm-none-eabi-g++ $ARCH -fno-common $FWFLAGS -I$FW -Istub elements_dsp.cc $DSP -x c startup.c ${LDFLAGS/FLASH_ORIGIN=0/FLASH_ORIGIN=0x08000000} -lm -o "$OUT/elements_flash.elf" > /dev/null 2>&1 &&
+    arm-none-eabi-objcopy -O binary "$OUT/elements_flash.elf" prebuilt/elements_flash.bin
+  echo "prebuilt/ mis a jour"
 fi
 [ $fail = 0 ] && echo "TOUT EST CONFORME" || echo "DES ECARTS SUBSISTENT"
 exit $fail
