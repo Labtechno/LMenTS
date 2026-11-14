@@ -56,8 +56,12 @@ et elles montrent pourquoi émuler la puce vaut mieux que recompiler le code :
   documentation du Cortex-M4. Elles serviront à la jauge de l'étape 4 et restent
   une estimation.
 - **Le temps d'accès à la mémoire flash** du STM32F405 n'est pas encore modélisé.
-- **La vitesse sur Mac** : voir l'onglet Actions (tests sur un Mac Apple Silicon
-  de GitHub). Aucune mesure sur un M4 Max pour l'instant.
+- **La vitesse sur un M4 Max** n'est pas mesurée. Seule mesure disponible : sur le
+  Mac Apple Silicon de GitHub (un M1 virtuel), l'émulateur calcule le son d'Elements
+  en utilisant 83 % d'un cœur, avant toute optimisation. Un M4 Max est à peu près
+  deux fois plus rapide par cœur : on peut s'attendre à environ la moitié d'un cœur
+  par instance (estimation). La version Intel, essayée via Rosetta, n'atteint pas
+  le temps réel (132 %). L'optimisation est prévue à l'étape 5.
 
 ## Refaire les tests
 
