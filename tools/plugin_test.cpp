@@ -1,8 +1,12 @@
 // LMenTS — essai du processeur du plugin, sans logiciel hôte : chargement d'un
-// firmware, notes MIDI, accord, entrées audio, enregistrement et relecture de
-// l'état d'un projet.
+// firmware, notes MIDI, accord, entrées audio, mémoire de chaque firmware,
+// enregistrement et relecture de l'état d'un projet.
 //
 //   plugin_test <elements.wav|.bin> [fichier_invalide]
+//
+// Pour l'essai de la mémoire par firmware, un deuxième firmware est fabriqué à
+// partir du premier : le même programme, suivi de quatre octets nuls. Son
+// empreinte est différente, le plugin le traite donc comme un autre firmware.
 //
 // Licence MIT.
 
@@ -96,6 +100,37 @@ double pitchOf(LmentsAudioProcessor& p, int note) {
   // SPACE à zéro : OUT L porte l'excitateur seul, OUT R le résonateur seul.
   return fundamental(r.right);
 }
+
+// Niveau de OUT R pendant une note de maillet : il dépend nettement du modèle de résonateur.
+double noteLevel(LmentsAudioProcessor& p) {
+  render(p, 1.0);
+  juce::MidiBuffer midi;
+  midi.addEvent(juce::MidiMessage::noteOn(1, 52, static_cast<juce::uint8>(100)), 0);
+  midi.addEvent(juce::MidiMessage::noteOff(1, 52), 2400);
+  const Run r = render(p, 0.8, &midi);
+  render(p, 2.0);
+  return rms(r.right);
+}
+
+// Change de modèle de résonateur comme sur le module : atténuverseurs du
+// résonateur à fond à droite, DAMPING, POSITION et SPACE presque au maximum, puis
+// PLAY tenu trois secondes. Le firmware enregistre le nouveau modèle en mémoire.
+void nextResonatorModel(LmentsAudioProcessor& p) {
+  const char* ids[] = { "geometryAtt", "brightnessAtt", "dampingAtt", "positionAtt", "spaceAtt", "damping", "position", "space" };
+  float saved[8];
+  for (int i = 0; i < 8; ++i) saved[i] = p.apvts.getRawParameterValue(ids[i])->load();
+  for (int i = 0; i < 5; ++i) setParam(p, ids[i], 1.0f);
+  for (int i = 5; i < 8; ++i) setParam(p, ids[i], 0.9f);
+  render(p, 1.0);
+  setParam(p, "play", 1.0f);
+  render(p, 3.4);
+  setParam(p, "play", 0.0f);
+  render(p, 0.5);
+  for (int i = 0; i < 8; ++i) setParam(p, ids[i], saved[i]);
+  render(p, 5.0);   // les potards rejoignent leur position, le module se calme
+}
+
+bool close(double a, double b, double tolerance) { return std::abs(a - b) <= tolerance * std::max(a, b); }
 
 }  // namespace
 
@@ -232,6 +267,115 @@ int main(int argc, char** argv) {
     std::snprintf(what, sizeof(what), "l'hote a %.1f kHz : le module joue", rate / 1000.0);
     expect(sum > 0.1 && !r.moduleCrashed(), what);
   }
+
+  // --- Mémoire de chaque firmware ------------------------------------------------------
+  std::printf("Memoire par firmware :\n");
+  const juce::File firmwareA { juce::String(argv[1]) };
+  const juce::File firmwareB = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("lments-test-B.bin");
+  {
+    // Le deuxième firmware : l'image du premier (décodée si c'est un .wav), plus 4 octets nuls.
+    LmentsAudioProcessor tmp;
+    tmp.setPlayConfigDetails(2, 2, kRate, kBlock);
+    tmp.prepareToPlay(kRate, kBlock);
+    tmp.loadFirmwareFile(firmwareA);
+    juce::MemoryBlock st;
+    tmp.getStateInformation(st);
+    auto xml = juce::AudioProcessor::getXmlFromBinary(st.getData(), static_cast<int>(st.getSize()));
+    juce::MemoryBlock image;
+    image.fromBase64Encoding(xml->getChildByName("MODULE")->getStringAttribute("firmwareImage"));
+    const uint8_t zeros[4] = {};
+    image.append(zeros, 4);
+    firmwareB.replaceWithData(image.getData(), image.getSize());
+  }
+  LmentsAudioProcessor m;
+  m.setPlayConfigDetails(2, 2, kRate, kBlock);
+  m.prepareToPlay(kRate, kBlock);
+  m.loadFirmwareFile(firmwareA);
+  render(m, 3.0);
+  const juce::String idA = m.firmwareId();
+  const double model0 = noteLevel(m);
+  nextResonatorModel(m);
+  const double model1 = noteLevel(m);
+  std::printf("  niveau d'une note : %.4f avec le modele d'origine, %.4f apres l'appui long\n", model0, model1);
+  expect(!close(model0, model1, 0.2), "l'appui long sur PLAY change le modele de resonateur");
+
+  expect(m.loadFirmwareFile(firmwareB).isEmpty() && m.firmwareId() != idA, "un deuxieme firmware (autre empreinte) se charge");
+  render(m, 3.0);
+  expect(!m.memoryRestored(), "un firmware jamais utilise demarre comme un module neuf");
+  const double levelB = noteLevel(m);
+  std::printf("  deuxieme firmware : %.4f\n", levelB);
+  expect(close(levelB, model0, 0.15), "le deuxieme firmware joue avec le modele d'origine");
+
+  m.loadFirmwareFile(firmwareA);
+  render(m, 3.0);
+  const double backA = noteLevel(m);
+  std::printf("  retour au premier : %.4f\n", backA);
+  expect(m.memoryRestored() && close(backA, model1, 0.15), "revenir au premier firmware lui rend sa memoire (modele change)");
+  expect(m.numMemories() == 2, "le projet garde la memoire des deux firmwares");
+
+  juce::MemoryBlock projectState;
+  m.getStateInformation(projectState);
+  {
+    LmentsAudioProcessor r;
+    r.setPlayConfigDetails(2, 2, kRate, kBlock);
+    r.prepareToPlay(kRate, kBlock);
+    r.setStateInformation(projectState.getData(), static_cast<int>(projectState.getSize()));
+    render(r, 3.0);
+    const double reloaded = noteLevel(r);
+    expect(r.firmwareId() == idA && r.numMemories() == 2, "projet relu : firmware et memoires des deux firmwares");
+    expect(close(reloaded, model1, 0.15), "projet relu : le modele de resonateur choisi est garde");
+    r.loadFirmwareFile(firmwareB);
+    render(r, 3.0);
+    expect(r.memoryRestored(), "projet relu : l'autre firmware retrouve sa memoire");
+    r.loadFirmwareFile(firmwareA);
+    render(r, 3.0);
+    r.resetFirmwareMemory();
+    render(r, 3.0);
+    const double reset = noteLevel(r);
+    std::printf("  apres reglages d'usine : %.4f\n", reset);
+    expect(!r.memoryRestored() && close(reset, model0, 0.15), "reglages d'usine : retour au modele d'origine");
+  }
+
+  // Projet enregistré par la version de l'étape 2 : la zone des réglages (secteur 1)
+  // dans la propriété « settings ».
+  {
+    auto xml = juce::AudioProcessor::getXmlFromBinary(projectState.getData(), static_cast<int>(projectState.getSize()));
+    auto* module = xml->getChildByName("MODULE");
+    juce::String sector1;
+    for (auto* memory : module->getChildWithTagNameIterator("MEMORY")) {
+      if (!memory->getBoolAttribute("current")) continue;
+      for (auto* sector : memory->getChildWithTagNameIterator("SECTOR"))
+        if (sector->getIntAttribute("index") == 1) sector1 = sector->getStringAttribute("data");
+    }
+    module->deleteAllChildElementsWithTagName("MEMORY");
+    module->setAttribute("settings", sector1);
+    juce::MemoryBlock old;
+    juce::AudioProcessor::copyXmlToBinary(*xml, old);
+    LmentsAudioProcessor r;
+    r.setPlayConfigDetails(2, 2, kRate, kBlock);
+    r.prepareToPlay(kRate, kBlock);
+    r.setStateInformation(old.getData(), static_cast<int>(old.getSize()));
+    render(r, 3.0);
+    expect(sector1.isNotEmpty() && close(noteLevel(r), model1, 0.15), "projet de l'etape 2 : ses reglages sont repris");
+  }
+
+  // --- Faux firmware : le plugin le signale -----------------------------------------------
+  {
+    // Table de vecteurs valable, puis une boucle sans fin : le son ne démarre jamais.
+    const uint8_t image[16] = { 0x00, 0x00, 0x02, 0x20, 0x09, 0x80, 0x00, 0x08, 0xfe, 0xe7, 0, 0, 0, 0, 0, 0 };
+    const juce::File fake = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("lments-test-boucle.bin");
+    fake.replaceWithData(image, sizeof(image));
+    LmentsAudioProcessor r;
+    r.setPlayConfigDetails(2, 2, kRate, kBlock);
+    r.prepareToPlay(kRate, kBlock);
+    expect(r.loadFirmwareFile(fake).isEmpty(), "un firmware qui ne fait rien se charge quand meme");
+    render(r, 1.0);
+    expect(r.problem() == LmentsAudioProcessor::Problem::kNone, "pendant 2 secondes, pas d'alerte (temps de demarrage)");
+    render(r, 1.5);
+    expect(r.problem() == LmentsAudioProcessor::Problem::kNoSound, "au-dela : le plugin signale que le son n'a pas demarre");
+    fake.deleteFile();
+  }
+  firmwareB.deleteFile();
 
   std::printf(failures ? "DES ECHECS\n" : "OK\n");
   return failures ? 1 : 0;

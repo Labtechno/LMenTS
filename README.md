@@ -13,7 +13,7 @@ Projet indépendant, sans lien avec le fabricant du module.
 |---|---|---|
 | 1 | Processeur Cortex-M4F émulé, avec ses tests | fait |
 | 2 | Périphériques de la puce, carte du module, plugin : le firmware démarre, les potards, les CV, les LED et le son marchent | fait (version d'essai) |
-| 3 | Mémoire séparée par firmware, firmwares personnels, finitions du chargement | à faire |
+| 3 | Chargement des firmwares, mémoire séparée par firmware, sauvée dans le projet | fait |
 | 4 | Temps d'accès mémoire, jauge d'occupation du processeur fiable, craquements en cas de surcharge | à faire |
 | 5 | Optimisation, installateur Mac définitif, version Windows et son installateur | à faire |
 
@@ -47,6 +47,32 @@ Aucun firmware n'est fourni avec le plugin.
   la note entendue (vérifié : la 3 = 220,0 Hz).
 - **Jauges** : occupation de la puce du module (estimation) et part d'un cœur de
   ton Mac utilisée par l'émulation.
+
+## Firmwares et mémoire
+
+- **Charger** : bouton « Charger un firmware… », menu « Récents ▾ » (les dix
+  derniers fichiers ouverts sur ce Mac), ou fichier déposé sur le plugin. Formats :
+  le `.wav` de mise à jour officiel, ou une image `.bin` (par exemple un firmware
+  recompilé avec `tools/build_firmware.sh`).
+- **Chaque firmware a sa propre mémoire**, comme un module qu'on mettrait à jour
+  puis remettrait à jour : calibration, modèle de résonateur (appui long sur PLAY),
+  mode caché. Un firmware est reconnu par son empreinte (affichée sous son nom).
+  Revenir à un firmware déjà utilisé dans le projet lui rend sa mémoire ; un
+  firmware nouveau démarre comme un module neuf.
+- **Tout est sauvé dans le projet Reason** : le firmware chargé, sa mémoire, et
+  celles des autres firmwares utilisés dans ce projet.
+- **Réglages d'usine…** : efface la mémoire du firmware chargé et le redémarre
+  comme un module neuf (les potards ne bougent pas).
+- **Alertes** : si un firmware n'a pas démarré le son au bout de deux secondes, ou
+  si son processeur s'arrête sur une erreur, le plugin l'écrit sous son nom.
+- **La mémoire**, ce sont les secteurs de la flash qui ne contiennent pas le
+  programme. Le firmware officiel n'utilise que le secteur 1 ; un firmware
+  personnel peut en utiliser d'autres, ils sont gardés de la même façon.
+- **Aucun firmware n'est fourni avec le plugin.** Le code d'Elements est sous
+  licence MIT, mais le firmware officiel contient aussi un petit fichier sous
+  licence GPL (`event_queue.h`, la file des appuis sur le bouton). Distribuer le
+  fichier compilé obligerait à respecter aussi la GPL : par prudence, LMenTS ne
+  fournit rien et chacun charge son fichier.
 
 ## Ce qui est vérifié à l'étape 1
 
@@ -88,6 +114,18 @@ et elles montrent pourquoi émuler la puce vaut mieux que recompiler le code :
 | EXT IN | un son envoyé fait sonner le résonateur |
 | Plugin : notes MIDI, stéréo, CV, enregistrement et relecture du projet, hôte à 44,1 / 48 / 96 kHz | tout marche |
 | Firmware recompilé depuis ses sources (outil `tools/build_firmware.sh`) | démarre et joue juste, comme l'officiel |
+
+## Ce qui est vérifié à l'étape 3
+
+| Essai (`tools/plugin_test.cpp`) | Résultat |
+|---|---|
+| Appui long sur PLAY, potards du résonateur au maximum | le firmware change de modèle de résonateur et l'enregistre en mémoire |
+| Passage à un autre firmware | il démarre comme un module neuf, avec le modèle d'origine |
+| Retour au premier firmware | il retrouve son modèle changé |
+| Projet enregistré puis relu | firmware, modèle choisi, et mémoire de l'autre firmware retrouvés |
+| Réglages d'usine | retour au modèle d'origine |
+| Projet enregistré par la version de l'étape 2 | ses réglages sont repris |
+| Faux firmware (une boucle sans fin) | chargé, puis signalé : « n'a pas démarré le son » |
 
 ### Ce qui n'est pas encore vérifié
 

@@ -87,6 +87,22 @@ LmentsAudioProcessorEditor::LmentsAudioProcessorEditor(LmentsAudioProcessor& p)
   loadButton_.setButtonText(utf8("Charger un firmware\xe2\x80\xa6"));
   loadButton_.onClick = [this] { chooseFirmware(); };
   addAndMakeVisible(loadButton_);
+  recentButton_.setButtonText(utf8("R\xc3\xa9" "cents \xe2\x96\xbe"));
+  recentButton_.onClick = [this] { showRecent(); };
+  addAndMakeVisible(recentButton_);
+  resetButton_.setButtonText(utf8("R\xc3\xa9glages d'usine\xe2\x80\xa6"));
+  resetButton_.setTooltip(utf8("Efface la m\xc3\xa9moire de ce firmware (calibration, mod\xc3\xa8le de r\xc3\xa9sonateur, mode cach\xc3\xa9) et le red\xc3\xa9marre comme un module neuf."));
+  resetButton_.onClick = [this] { confirmReset(); };
+  addAndMakeVisible(resetButton_);
+
+  juce::PropertiesFile::Options options;
+  options.applicationName = "LMenTS-recents";
+  options.filenameSuffix = "settings";
+  options.osxLibrarySubFolder = "Application Support";
+  options.folderName = "LMenTS";
+  settings_ = std::make_unique<juce::PropertiesFile>(options);
+  recent_.setMaxNumberOfItems(10);
+  recent_.restoreFromString(settings_->getValue("recentFirmwares"));
 
   gateSource_.addItemList({ "Notes MIDI", "Rien" }, 1);
   addAndMakeVisible(gateSource_);
@@ -128,11 +144,13 @@ void LmentsAudioProcessorEditor::resized() {
     knobs_[i].setBounds(juce::Rectangle<float>(c.x - 0.5f * d, c.y - 0.5f * d, d, d).toNearestInt());
   }
   const int left = kPanelWidth + 16, width = kSideWidth - 32;
-  loadButton_.setBounds(left, 66, width, 26);
-  gateSource_.setBounds(left + 110, 246, width - 110, 22);
-  bendRange_.setBounds(left + 110, 272, width - 110, 22);
+  loadButton_.setBounds(left, 64, width - 96, 26);
+  recentButton_.setBounds(left + width - 90, 64, 90, 26);
+  resetButton_.setBounds(left, 116, 150, 24);
+  gateSource_.setBounds(left + 110, 286, width - 110, 22);
+  bendRange_.setBounds(left + 110, 310, width - 110, 22);
   for (size_t i = 0; i < kCvs.size(); ++i) {
-    const int y = 318 + 30 * static_cast<int>(i);
+    const int y = 356 + 27 * static_cast<int>(i);
     cvSources_[i].setBounds(left + 110, y, 104, 22);
     cvValues_[i].setBounds(left + 218, y, width - 218, 22);
   }
@@ -277,13 +295,28 @@ void LmentsAudioProcessorEditor::paintSide(juce::Graphics& g) {
   g.setFont(juce::FontOptions(12.5f));
   g.setColour(processor_.hasFirmware() ? kSideText : kSideDim);
   g.drawText(processor_.hasFirmware() ? processor_.firmwareName() : utf8("aucun"), left, 40, width, 20, juce::Justification::centredLeft, true);
-  if (message_.isNotEmpty()) {
+  if (processor_.hasFirmware()) {
+    g.setColour(kSideDim);
+    g.setFont(juce::FontOptions(11.0f));
+    g.drawText(utf8("empreinte ") + processor_.firmwareId() + utf8(" \xc2\xb7 ") +
+                   (processor_.memoryRestored() ? utf8("r\xc3\xa9glages repris du projet") : utf8("module neuf")),
+               left, 94, width, 18, juce::Justification::centredLeft, true);
+  }
+  // Message : erreur de chargement, ou problème du firmware en marche.
+  juce::String warning = message_;
+  if (warning.isEmpty() && processor_.hasFirmware()) {
+    if (processor_.problem() == LmentsAudioProcessor::Problem::kCrashed)
+      warning = utf8("Le processeur du module s'est arr\xc3\xaat\xc3\xa9 : ce firmware a rencontr\xc3\xa9 une erreur.");
+    else if (processor_.problem() == LmentsAudioProcessor::Problem::kNoSound)
+      warning = utf8("Ce firmware n'a pas d\xc3\xa9marr\xc3\xa9 le son : ce n'est peut-\xc3\xaatre pas un firmware Elements.");
+  }
+  if (warning.isNotEmpty()) {
     g.setColour(juce::Colour(0xffff8a7a));
     g.setFont(juce::FontOptions(11.5f));
-    g.drawFittedText(message_, left, 94, width, 30, juce::Justification::topLeft, 2);
+    g.drawFittedText(warning, left, 146, width, 30, juce::Justification::topLeft, 2);
   }
 
-  title("Charge", 128);
+  title("Charge", 180);
   auto gauge = [&](const juce::String& text, float value, int y, const juce::String& suffix) {
     row(text, y);
     const juce::Rectangle<int> bar(left + 110, y + 6, width - 110 - 52, 10);
@@ -296,21 +329,16 @@ void LmentsAudioProcessorEditor::paintSide(juce::Graphics& g) {
     g.drawText(suffix, bar.getRight() + 6, y, 46, 22, juce::Justification::centredRight, false);
   };
   const float moduleLoad = processor_.moduleLoad(), hostLoad = processor_.hostLoad();
-  gauge(utf8("Puce du module"), moduleLoad, 154, juce::String(juce::roundToInt(moduleLoad * 100.0f)) + " %");
-  gauge(utf8("Ce Mac (1 c\xc5\x93ur)"), hostLoad, 178, juce::String(juce::roundToInt(hostLoad * 100.0f)) + " %");
-  if (processor_.moduleCrashed()) {
-    g.setColour(juce::Colour(0xffff8a7a));
-    g.setFont(juce::FontOptions(11.5f));
-    g.drawText(utf8("Le processeur du module s'est arr\xc3\xaat\xc3\xa9 (firmware en erreur)."), left, 198, width, 16, juce::Justification::centredLeft, true);
-  }
+  gauge(utf8("Puce du module"), moduleLoad, 204, juce::String(juce::roundToInt(moduleLoad * 100.0f)) + " %");
+  gauge(utf8("Ce Mac (1 c\xc5\x93ur)"), hostLoad, 228, juce::String(juce::roundToInt(hostLoad * 100.0f)) + " %");
 
-  title(utf8("Interface MIDI \xe2\x86\x92 CV"), 220);
-  row("GATE", 246);
-  row("Pitch bend", 272);
+  title(utf8("Interface MIDI \xe2\x86\x92 CV"), 260);
+  row("GATE", 286);
+  row("Pitch bend", 310);
   g.setColour(kSideDim);
   g.setFont(juce::FontOptions(11.0f));
-  g.drawText(utf8("V/OCT : notes MIDI (0 V = note 36)"), left, 296, width, 18, juce::Justification::centredLeft, false);
-  for (size_t i = 0; i < kCvs.size(); ++i) row(kCvs[i].label, 318 + 30 * static_cast<int>(i));
+  g.drawText(utf8("V/OCT : notes MIDI (0 V = note 36)"), left, 334, width, 18, juce::Justification::centredLeft, false);
+  for (size_t i = 0; i < kCvs.size(); ++i) row(kCvs[i].label, 356 + 27 * static_cast<int>(i));
 }
 
 void LmentsAudioProcessorEditor::paint(juce::Graphics& g) {
@@ -323,6 +351,7 @@ void LmentsAudioProcessorEditor::paint(juce::Graphics& g) {
 void LmentsAudioProcessorEditor::timerCallback() {
   // « Automation » : la tension vient du curseur ; sinon le curseur ne sert pas.
   for (size_t i = 0; i < kCvs.size(); ++i) cvValues_[i].setEnabled(cvSources_[i].getSelectedId() == 5);
+  resetButton_.setEnabled(processor_.hasFirmware());
   repaint();
 }
 
@@ -354,7 +383,37 @@ void LmentsAudioProcessorEditor::chooseFirmware() {
 
 void LmentsAudioProcessorEditor::loadFirmware(const juce::File& file) {
   message_ = processor_.loadFirmwareFile(file);
+  if (message_.isEmpty()) {
+    recent_.addFile(file);
+    settings_->setValue("recentFirmwares", recent_.toString());
+    settings_->saveIfNeeded();
+  }
   repaint();
+}
+
+void LmentsAudioProcessorEditor::showRecent() {
+  recent_.removeNonExistentFiles();
+  juce::PopupMenu menu;
+  if (recent_.getNumFiles() == 0) menu.addItem(1, utf8("(aucun firmware ouvert r\xc3\xa9" "cemment)"), false);
+  for (int i = 0; i < recent_.getNumFiles(); ++i) {
+    const auto file = recent_.getFile(i);
+    menu.addItem(100 + i, file.getFileName() + "   (" + file.getParentDirectory().getFileName() + ")");
+  }
+  menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&recentButton_), [this](int result) {
+    if (result >= 100 && result - 100 < recent_.getNumFiles()) loadFirmware(recent_.getFile(result - 100));
+  });
+}
+
+void LmentsAudioProcessorEditor::confirmReset() {
+  if (!processor_.hasFirmware()) return;
+  juce::AlertWindow::showOkCancelBox(
+      juce::MessageBoxIconType::QuestionIcon, utf8("R\xc3\xa9glages d'usine"),
+      utf8("Effacer la m\xc3\xa9moire de \xc2\xab ") + processor_.firmwareName() +
+          utf8(" \xc2\xbb et le red\xc3\xa9marrer comme un module neuf ?\n\nLa calibration, le mod\xc3\xa8le de r\xc3\xa9sonateur et le mode cach\xc3\xa9 reviennent \xc3\xa0 leurs r\xc3\xa9glages d'usine. Les potards ne bougent pas."),
+      utf8("Effacer"), utf8("Annuler"), this,
+      juce::ModalCallbackFunction::create([this](int ok) {
+        if (ok) { processor_.resetFirmwareMemory(); message_ = {}; repaint(); }
+      }));
 }
 
 bool LmentsAudioProcessorEditor::isInterestedInFileDrag(const juce::StringArray& files) {

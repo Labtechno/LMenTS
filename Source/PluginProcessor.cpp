@@ -166,6 +166,16 @@ juce::String LmentsAudioProcessor::firmwareName() const {
   return firmware_.name;
 }
 
+juce::String LmentsAudioProcessor::firmwareId() const {
+  const juce::SpinLock::ScopedLockType lock(const_cast<juce::SpinLock&>(moduleLock_));
+  return juce::String(firmware_.id);
+}
+
+int LmentsAudioProcessor::numMemories() const {
+  const juce::SpinLock::ScopedLockType lock(const_cast<juce::SpinLock&>(moduleLock_));
+  return static_cast<int>(otherMemories_.size()) + (hasFirmware_.load() ? 1 : 0);
+}
+
 juce::String LmentsAudioProcessor::loadFirmwareFile(const juce::File& file) {
   juce::MemoryBlock bytes;
   if (!file.loadFileAsData(bytes)) return juce::String::fromUTF8("Impossible de lire ce fichier.");
@@ -174,47 +184,76 @@ juce::String LmentsAudioProcessor::loadFirmwareFile(const juce::File& file) {
   if (!emu::readFirmwareFile(static_cast<const uint8_t*>(bytes.getData()), bytes.getSize(), image, error)) {
     return juce::String::fromUTF8(error.c_str());
   }
-  // Comme une mise à jour du module : les réglages enregistrés restent en place.
-  std::vector<uint8_t> settings;
-  const bool keep = hasFirmware_.load();
-  if (keep) settings = currentSettings();
+  Firmware next;
+  next.name = file.getFileNameWithoutExtension();
+  next.id = emu::firmwareId(image.data);
+  next.image = std::move(image.data);
+
+  Memory memory;
+  bool restored = false;
   {
     const juce::SpinLock::ScopedLockType lock(moduleLock_);
-    firmware_.name = file.getFileNameWithoutExtension();
-    firmware_.image = std::move(image.data);
+    // La mémoire du firmware quitté est mise de côté (ou reprise telle quelle si
+    // on recharge le même firmware).
+    if (hasFirmware_.load()) {
+      Memory current = captureMemory();
+      if (firmware_.id == next.id) { memory = std::move(current); restored = true; }
+      else otherMemories_[firmware_.id] = std::move(current);
+    }
+    if (!restored) {
+      const auto it = otherMemories_.find(next.id);
+      if (it != otherMemories_.end()) { memory = std::move(it->second); otherMemories_.erase(it); restored = true; }
+    }
+    firmware_ = std::move(next);
   }
-  boot(keep ? &settings : nullptr);
+  boot(restored ? &memory : nullptr);
+  memoryRestored_.store(restored);
   return {};
 }
 
-std::vector<uint8_t> LmentsAudioProcessor::currentSettings() {
-  const juce::SpinLock::ScopedLockType lock(moduleLock_);
-  const uint8_t* p = machine_.flashImage() + (emu::ElementsMachine::kSettingsBase - emu::CortexM4::kFlashBase);
-  return std::vector<uint8_t>(p, p + emu::ElementsMachine::kSettingsSize);
+void LmentsAudioProcessor::resetFirmwareMemory() {
+  if (!hasFirmware_.load()) return;
+  boot(nullptr);
+  memoryRestored_.store(false);
 }
 
-// Met le module sous tension avec le firmware courant. `settings` : contenu de la
-// zone des réglages (nul = module neuf, le firmware écrit ses réglages d'usine).
-void LmentsAudioProcessor::boot(const std::vector<uint8_t>* settings) {
+LmentsAudioProcessor::Memory LmentsAudioProcessor::captureMemory() {
+  Memory memory;
+  if (!hasFirmware_.load()) return memory;
+  for (int sector = 1; sector < emu::ElementsMachine::kNumSectors; ++sector) {
+    if (machine_.sectorHoldsProgram(sector)) continue;
+    uint32_t offset, size;
+    emu::ElementsMachine::sectorRange(sector, offset, size);
+    std::vector<uint8_t> data(size);
+    machine_.readSector(sector, data.data());
+    if (std::any_of(data.begin(), data.end(), [](uint8_t b) { return b != 0xff; })) memory[sector] = std::move(data);
+  }
+  return memory;
+}
+
+// Met le module sous tension avec le firmware courant et la mémoire donnée
+// (nulle = module neuf : le firmware écrit lui-même ses réglages d'usine).
+void LmentsAudioProcessor::boot(const Memory* memory) {
   const juce::SpinLock::ScopedLockType lock(moduleLock_);
   if (firmware_.image.empty() || !machine_.loadApplication(firmware_.image.data(), firmware_.image.size())) {
     hasFirmware_.store(false);
     return;
   }
-  if (settings != nullptr && settings->size() == emu::ElementsMachine::kSettingsSize) {
-    std::vector<uint8_t> flash(machine_.flashImage(), machine_.flashImage() + emu::ElementsMachine::kFlashSize);
-    std::copy(settings->begin(), settings->end(),
-              flash.begin() + (emu::ElementsMachine::kSettingsBase - emu::CortexM4::kFlashBase));
-    machine_.restoreFlash(flash.data(), flash.size());
-  } else {
-    machine_.eraseSettings();
+  for (int sector = 1; sector < emu::ElementsMachine::kNumSectors; ++sector) {
+    if (machine_.sectorHoldsProgram(sector)) continue;
+    uint32_t offset, size;
+    emu::ElementsMachine::sectorRange(sector, offset, size);
+    const auto it = memory ? memory->find(sector) : Memory::const_iterator();
+    const bool saved = memory && it != memory->end() && it->second.size() == size;
+    machine_.writeSector(sector, saved ? it->second.data() : nullptr);
   }
   machine_.setUniqueId(uid_);
   updateControls();
   machine_.powerOn();
-  loadCycles_ = machine_.cycles();
+  bootCycles_ = loadCycles_ = machine_.cycles();
   loadIdle_ = machine_.cpu().handlerCycles();
   moduleCrashed_.store(false);
+  problem_.store(0);
   hasFirmware_.store(true);
 }
 
@@ -420,6 +459,10 @@ void LmentsAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     ledResonator_.store(leds.resonator);
     moduleCrashed_.store(machine_.crashed());
     moduleOverruns_.store(machine_.overruns());
+    // Deux secondes après la mise sous tension, le son doit avoir démarré.
+    if (machine_.crashed()) problem_.store(static_cast<int>(Problem::kCrashed));
+    else if (!machine_.audioRunning() && machine_.cycles() - bootCycles_ > 2 * 168000000ull) problem_.store(static_cast<int>(Problem::kNoSound));
+    else problem_.store(static_cast<int>(Problem::kNone));
     const uint64_t cycles = machine_.cycles();
     if (cycles - loadCycles_ > 42000000) {   // quatre fois par seconde
       // Le firmware calcule le son dans ses interruptions ; sa boucle principale ne
@@ -458,32 +501,62 @@ juce::AudioProcessorEditor* LmentsAudioProcessor::createEditor() {
   return new LmentsAudioProcessorEditor(*this);
 }
 
-// --- État : paramètres + firmware + mémoire du module ---------------------------------------
+// --- État : paramètres + firmware + mémoires ----------------------------------------------
 //
 // Le firmware chargé voyage avec le projet. Comme le vrai module, LMenTS garde ses
-// réglages (calibration, modèle de résonateur, mode caché) dans sa flash : cette
-// zone est enregistrée aussi. À la réouverture, le module est remis sous tension
-// avec ce contenu, exactement comme un module qu'on rallume.
+// réglages (calibration, modèle de résonateur, mode caché) dans sa flash : la
+// mémoire du firmware chargé est enregistrée, ainsi que celles des autres
+// firmwares utilisés dans ce projet. À la réouverture, le module est remis sous
+// tension avec sa mémoire, exactement comme un module qu'on rallume.
+//
+//   <MODULE uid firmwareName firmwareId firmwareImage>
+//     <MEMORY firmwareId current="1"> <SECTOR index data/> ... </MEMORY>
+//     <MEMORY firmwareId> ... </MEMORY>          (autres firmwares)
+//   </MODULE>
+
+namespace {
+
+juce::String toBase64(const std::vector<uint8_t>& bytes) {
+  return juce::MemoryBlock(bytes.data(), bytes.size()).toBase64Encoding();
+}
+
+std::vector<uint8_t> fromBase64(const juce::var& v) {
+  juce::MemoryBlock block;
+  block.fromBase64Encoding(v.toString());
+  const auto* p = static_cast<const uint8_t*>(block.getData());
+  return std::vector<uint8_t>(p, p + block.getSize());
+}
+
+}  // namespace
 
 void LmentsAudioProcessor::getStateInformation(juce::MemoryBlock& destData) {
   auto state = apvts.copyState();
-  auto base64 = [](const std::vector<uint8_t>& bytes) {
-    return juce::MemoryBlock(bytes.data(), bytes.size()).toBase64Encoding();
-  };
   juce::ValueTree moduleTree("MODULE");
   moduleTree.setProperty("uid", juce::String::toHexString(static_cast<juce::int64>(uid_[0])) + ":" +
                                     juce::String::toHexString(static_cast<juce::int64>(uid_[1])) + ":" +
                                     juce::String::toHexString(static_cast<juce::int64>(uid_[2])),
                          nullptr);
-  if (hasFirmware_.load()) {
-    std::vector<uint8_t> image;
-    {
-      const juce::SpinLock::ScopedLockType lock(moduleLock_);
-      moduleTree.setProperty("firmwareName", firmware_.name, nullptr);
-      image = firmware_.image;
+  auto addMemory = [&moduleTree](const std::string& id, const Memory& memory, bool current) {
+    juce::ValueTree tree("MEMORY");
+    tree.setProperty("firmwareId", juce::String(id), nullptr);
+    if (current) tree.setProperty("current", true, nullptr);
+    for (const auto& sector : memory) {
+      juce::ValueTree child("SECTOR");
+      child.setProperty("index", sector.first, nullptr);
+      child.setProperty("data", toBase64(sector.second), nullptr);
+      tree.appendChild(child, nullptr);
     }
-    moduleTree.setProperty("firmwareImage", base64(image), nullptr);
-    moduleTree.setProperty("settings", base64(currentSettings()), nullptr);
+    moduleTree.appendChild(tree, nullptr);
+  };
+  {
+    const juce::SpinLock::ScopedLockType lock(moduleLock_);
+    if (hasFirmware_.load()) {
+      moduleTree.setProperty("firmwareName", firmware_.name, nullptr);
+      moduleTree.setProperty("firmwareId", juce::String(firmware_.id), nullptr);
+      moduleTree.setProperty("firmwareImage", toBase64(firmware_.image), nullptr);
+      addMemory(firmware_.id, captureMemory(), true);
+    }
+    for (const auto& other : otherMemories_) addMemory(other.first, other.second, false);
   }
   state.appendChild(moduleTree, nullptr);
   if (auto xml = state.createXml()) copyXmlToBinary(*xml, destData);
@@ -499,28 +572,50 @@ void LmentsAudioProcessor::setStateInformation(const void* data, int sizeInBytes
   apvts.replaceState(tree);
   if (!moduleTree.isValid()) return;
 
-  auto bytes = [](const juce::var& v) {
-    juce::MemoryBlock block;
-    block.fromBase64Encoding(v.toString());
-    const auto* p = static_cast<const uint8_t*>(block.getData());
-    return std::vector<uint8_t>(p, p + block.getSize());
-  };
   const auto uidParts = juce::StringArray::fromTokens(moduleTree["uid"].toString(), ":", "");
   if (uidParts.size() == 3) {
     for (int i = 0; i < 3; ++i) uid_[i] = static_cast<uint32_t>(uidParts[i].getHexValue64());
   }
-  if (!moduleTree.hasProperty("firmwareImage")) return;
-  emu::FirmwareImage image;
-  std::string error;
-  const auto raw = bytes(moduleTree["firmwareImage"]);
-  if (!emu::readFirmwareFile(raw.data(), raw.size(), image, error)) return;
+
+  std::map<std::string, Memory> memories;
+  Memory current;
+  for (const auto& child : moduleTree) {
+    if (!child.hasType("MEMORY")) continue;
+    Memory memory;
+    for (const auto& sector : child) {
+      if (sector.hasType("SECTOR")) memory[static_cast<int>(sector["index"])] = fromBase64(sector["data"]);
+    }
+    if (child["current"]) current = std::move(memory);
+    else memories[child["firmwareId"].toString().toStdString()] = std::move(memory);
+  }
+  // Projets de l'étape 2 : seule la zone des réglages du firmware officiel (secteur 1).
+  if (current.empty() && moduleTree.hasProperty("settings")) {
+    auto settings = fromBase64(moduleTree["settings"]);
+    if (settings.size() == emu::ElementsMachine::kSettingsSize) current[1] = std::move(settings);
+  }
+
+  Firmware firmware;
+  bool haveFirmware = false;
+  if (moduleTree.hasProperty("firmwareImage")) {
+    emu::FirmwareImage image;
+    std::string error;
+    const auto raw = fromBase64(moduleTree["firmwareImage"]);
+    if (emu::readFirmwareFile(raw.data(), raw.size(), image, error)) {
+      firmware.name = moduleTree["firmwareName"].toString();
+      firmware.id = emu::firmwareId(image.data);
+      firmware.image = std::move(image.data);
+      haveFirmware = true;
+    }
+  }
   {
     const juce::SpinLock::ScopedLockType lock(moduleLock_);
-    firmware_.name = moduleTree["firmwareName"].toString();
-    firmware_.image = std::move(image.data);
+    otherMemories_ = std::move(memories);
+    if (haveFirmware) firmware_ = std::move(firmware);
   }
-  const std::vector<uint8_t> settings = bytes(moduleTree["settings"]);
-  boot(&settings);
+  if (haveFirmware) {
+    boot(&current);
+    memoryRestored_.store(true);
+  }
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() {

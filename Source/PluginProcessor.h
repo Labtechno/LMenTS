@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -86,9 +87,24 @@ class LmentsAudioProcessor : public juce::AudioProcessor {
 
   // Charge un fichier .bin ou .wav (à appeler depuis le fil de l'interface).
   // Renvoie un message d'erreur, ou une chaîne vide.
+  //
+  // Chaque firmware a sa propre mémoire (ses réglages : calibration, modèle de
+  // résonateur, mode caché...), reconnue par l'empreinte du fichier. Revenir à un
+  // firmware déjà utilisé dans ce projet lui rend sa mémoire ; un firmware nouveau
+  // démarre comme un module neuf. Toutes ces mémoires sont sauvées dans le projet.
   juce::String loadFirmwareFile(const juce::File& file);
   bool hasFirmware() const { return hasFirmware_.load(); }
   juce::String firmwareName() const;
+  juce::String firmwareId() const;
+  // Efface la mémoire du firmware chargé et le redémarre : réglages d'usine.
+  void resetFirmwareMemory();
+  // Vrai si la mémoire du firmware chargé vient du projet (sinon : module neuf).
+  bool memoryRestored() const { return memoryRestored_.load(); }
+  int numMemories() const;
+
+  // Problème constaté au démarrage du firmware.
+  enum class Problem { kNone, kNoSound, kCrashed };
+  Problem problem() const { return static_cast<Problem>(problem_.load()); }
 
   // Voyants du module.
   struct Leds { bool play = false; float exciter = 0.0f, resonator = 0.0f; };
@@ -111,10 +127,14 @@ class LmentsAudioProcessor : public juce::AudioProcessor {
  private:
   struct Firmware {
     juce::String name;
+    std::string id;               // empreinte de l'image (FirmwareFile.h)
     std::vector<uint8_t> image;
   };
-  void boot(const std::vector<uint8_t>* settings);
-  std::vector<uint8_t> currentSettings();
+  // Mémoire d'un firmware : contenu des secteurs de flash qui ne contiennent pas
+  // son programme (seuls les secteurs non vierges sont gardés).
+  using Memory = std::map<int, std::vector<uint8_t>>;
+  void boot(const Memory* memory);
+  Memory captureMemory();               // à appeler avec moduleLock_ tenu
   void handleMidi(const juce::MidiMessage& message);
   void updateControls();
   void pullModuleBlock(float* left, float* right);
@@ -131,7 +151,10 @@ class LmentsAudioProcessor : public juce::AudioProcessor {
   // Module émulé et son firmware.
   lments::emu::ElementsMachine machine_;
   Firmware firmware_;
-  std::atomic<bool> hasFirmware_ { false };
+  std::map<std::string, Memory> otherMemories_;   // les firmwares utilisés avant dans ce projet
+  std::atomic<bool> hasFirmware_ { false }, memoryRestored_ { false };
+  std::atomic<int> problem_ { 0 };
+  uint64_t bootCycles_ = 0;
   uint32_t uid_[3] = { 0, 0, 0 };
   juce::SpinLock moduleLock_;
 

@@ -60,10 +60,22 @@ class ElementsMachine : public Bus {
   // firmware (secteur 1) sont conservés, comme lors d'une mise à jour du module.
   bool loadApplication(const uint8_t* data, size_t size);
 
-  // Flash complète (firmware + réglages), pour l'enregistrer dans le projet.
+  // Flash complète (firmware + réglages).
   const uint8_t* flashImage() { return cpu_.flash(); }
   void restoreFlash(const uint8_t* data, size_t size);
   void eraseSettings();
+
+  // La flash est découpée en 12 secteurs (4 x 16 Ko, 1 x 64 Ko, 7 x 128 Ko), la
+  // plus petite zone qu'on peut effacer. Le secteur 0 est le bootloader ; le
+  // firmware officiel range ses réglages dans le secteur 1, mais un autre
+  // firmware peut utiliser n'importe quel secteur libre. La « mémoire » d'un
+  // firmware, ce sont donc tous les secteurs qui ne contiennent pas son programme.
+  static constexpr int kNumSectors = 12;
+  static void sectorRange(int sector, uint32_t& offset, uint32_t& size);
+  // Vrai si le secteur contient une partie du programme chargé (ou le bootloader).
+  bool sectorHoldsProgram(int sector) const;
+  void readSector(int sector, uint8_t* data) const;
+  void writeSector(int sector, const uint8_t* data);   // nul = effacé (0xFF)
   uint32_t flashWriteCount() const { return flashWrites_; }
   // Nombre de blocs audio que le firmware n'a pas eu le temps de calculer (surcharge).
   uint32_t overruns() const { return overruns_; }
@@ -116,6 +128,7 @@ class ElementsMachine : public Bus {
   void dmaSetFlags(int controller, int stream, uint32_t flags);
 
   CortexM4 cpu_;
+  size_t applicationSize_ = 0;
   uint32_t uid_[3] = { 0x004c004d, 0x654e5453, 0x20313131 };
   std::unordered_map<uint32_t, uint32_t> otherRegisters_;
 

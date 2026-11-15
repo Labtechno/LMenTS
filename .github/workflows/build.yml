@@ -113,7 +113,7 @@ jobs:
         run: |
           VERSION="$(sed -n 's/^project(LMenTS VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
           cat > notes.md <<NOTES
-          Version $VERSION, compilée le $(date -u '+%d/%m/%Y') depuis la branche emulation (${GITHUB_SHA::7}). Version d'essai (étape 2).
+          Version $VERSION, compilée le $(date -u '+%d/%m/%Y') depuis la branche emulation (${GITHUB_SHA::7}). Version d'essai (étape 3).
 
           ## Installation
 

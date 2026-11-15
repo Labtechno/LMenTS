@@ -32,13 +32,6 @@ enum { kAdcSr = 0, kAdcCr1 = 1, kAdcCr2 = 2, kAdcSmpr1 = 3, kAdcSmpr2 = 4, kAdcS
 // Registres SPI / I2S (décalage / 4)
 enum { kSpiCr1 = 0, kSpiCr2 = 1, kSpiSr = 2, kSpiDr = 3, kSpiI2sCfgr = 7, kSpiI2sPr = 8 };
 
-// Secteurs de la flash du STM32F405 : 4 x 16 Ko, 1 x 64 Ko, 7 x 128 Ko.
-void sectorRange(uint32_t sector, uint32_t& offset, uint32_t& size) {
-  if (sector < 4) { offset = sector * 0x4000; size = 0x4000; }
-  else if (sector == 4) { offset = 0x10000; size = 0x10000; }
-  else { offset = 0x20000 * (sector - 4); size = 0x20000; }
-}
-
 // Position des drapeaux d'un flux dans les registres LISR / HISR.
 constexpr uint32_t kDmaFlagShift[4] = { 0, 6, 16, 22 };
 constexpr uint32_t kDmaHtif = 1u << 4, kDmaTcif = 1u << 5;
@@ -49,6 +42,35 @@ int dmaIrq(int controller, int stream) {
 }
 
 }  // namespace
+
+// Secteurs de la flash du STM32F405 : 4 x 16 Ko, 1 x 64 Ko, 7 x 128 Ko.
+void ElementsMachine::sectorRange(int sector, uint32_t& offset, uint32_t& size) {
+  if (sector < 4) { offset = static_cast<uint32_t>(sector) * 0x4000; size = 0x4000; }
+  else if (sector == 4) { offset = 0x10000; size = 0x10000; }
+  else { offset = 0x20000 * static_cast<uint32_t>(sector - 4); size = 0x20000; }
+}
+
+bool ElementsMachine::sectorHoldsProgram(int sector) const {
+  if (sector <= 0) return true;
+  uint32_t offset, size;
+  sectorRange(sector, offset, size);
+  const uint32_t start = kApplicationBase - CortexM4::kFlashBase;
+  const uint32_t end = start + static_cast<uint32_t>(applicationSize_);
+  return offset < end && offset + size > start;
+}
+
+void ElementsMachine::readSector(int sector, uint8_t* data) const {
+  uint32_t offset, size;
+  sectorRange(sector, offset, size);
+  std::memcpy(data, const_cast<CortexM4&>(cpu_).flash() + offset, size);
+}
+
+void ElementsMachine::writeSector(int sector, const uint8_t* data) {
+  uint32_t offset, size;
+  sectorRange(sector, offset, size);
+  if (data) std::memcpy(cpu_.flash() + offset, data, size);
+  else std::memset(cpu_.flash() + offset, 0xff, size);
+}
 
 ElementsMachine::ElementsMachine() : cpu_(kFlashSize, kRamSize, this, kCcmSize) {
   for (auto& p : controls.pot) p = 2048;
@@ -74,6 +96,7 @@ bool ElementsMachine::loadApplication(const uint8_t* data, size_t size) {
   std::memset(flash, 0xff, kSettingsBase - CortexM4::kFlashBase);
   std::memset(flash + offset, 0xff, kFlashSize - offset);
   std::memcpy(flash + offset, data, size);
+  applicationSize_ = size;
   // À la place du bootloader : la remise à zéro saute directement à l'application.
   std::memcpy(flash, data, 8);
   return true;
@@ -363,7 +386,7 @@ void ElementsMachine::flashControl(uint32_t value) {
     const uint32_t sector = (value >> 3) & 15;
     if (sector < 12) {
       uint32_t offset, size;
-      sectorRange(sector, offset, size);
+      sectorRange(static_cast<int>(sector), offset, size);
       std::memset(flash + offset, 0xff, size);
       seconds = sector < 4 ? erase16[psize] : (sector == 4 ? erase64[psize] : erase128[psize]);
     }

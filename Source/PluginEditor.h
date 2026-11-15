@@ -45,6 +45,8 @@ class LmentsAudioProcessorEditor : public juce::AudioProcessorEditor,
   void paintPanel(juce::Graphics&);
   void paintSide(juce::Graphics&);
   void chooseFirmware();
+  void showRecent();
+  void confirmReset();
   void loadFirmware(const juce::File& file);
   juce::Point<float> panelPoint(float x, float y) const;
   void setPlay(bool down);
@@ -55,9 +57,12 @@ class LmentsAudioProcessorEditor : public juce::AudioProcessorEditor,
   std::array<juce::Slider, lments::hw::kNumPots> knobs_;
   std::array<std::unique_ptr<SliderAttachment>, lments::hw::kNumPots> knobAttachments_;
 
-  juce::TextButton loadButton_;
+  juce::TextButton loadButton_, recentButton_, resetButton_;
   std::unique_ptr<juce::FileChooser> chooser_;
   juce::String message_;
+  // Firmwares ouverts récemment (sur cet ordinateur, tous projets confondus).
+  std::unique_ptr<juce::PropertiesFile> settings_;
+  juce::RecentlyOpenedFilesList recent_;
 
   juce::ComboBox gateSource_;
   std::unique_ptr<ComboAttachment> gateSourceAttachment_;
