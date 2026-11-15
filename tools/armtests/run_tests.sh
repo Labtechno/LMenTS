@@ -26,9 +26,10 @@ check() {  # nom, fichier de référence, fichier obtenu
   else printf "  %-44s DIFFERENT\n" "$1"; diff "$2" "$3" | head -6; fail=1; fi
 }
 
-run_qemu() {  # elf, sortie
+run_qemu() {  # elf, sortie [options de QEMU]
+  local elf=$1 out=$2; shift 2
   timeout 900 qemu-system-arm -M mps2-an386 -nographic -monitor none -serial stdio \
-      -semihosting -kernel "$1" > "$2" 2>/dev/null < /dev/null
+      -semihosting "$@" -kernel "$elf" > "$out" 2>/dev/null < /dev/null
 }
 
 build() {  # nom, optimisation, sources...
@@ -65,12 +66,10 @@ if [ $HAVE_QEMU = 1 ]; then
   for opt in -O0 -O2; do
     build "irq$opt" "$opt" irq.c || continue
     "$OUT/emu_run" "$OUT/irq$opt.bin" > "$OUT/irq$opt.out" 2> "$OUT/irq$opt.stat"
-    # La SysTick de QEMU suit l'horloge réelle de l'ordinateur : sur une machine
-    # chargée, le compte de ticks peut varier d'un essai à l'autre. On réessaie.
-    for try in 1 2 3 4 5; do
-      run_qemu "$OUT/irq$opt.elf" "$OUT/irq$opt.ref"
-      cmp -s "$OUT/irq$opt.ref" "$OUT/irq$opt.out" && break
-    done
+    # Sans option, la SysTick de QEMU suit l'horloge réelle de l'ordinateur : sur
+    # une machine chargée, le compte de ticks varie. Avec « -icount », le temps de
+    # QEMU avance avec les instructions exécutées : la référence ne varie plus.
+    run_qemu "$OUT/irq$opt.elf" "$OUT/irq$opt.ref" -icount shift=3,align=off
     check "irq $opt" "$OUT/irq$opt.ref" "$OUT/irq$opt.out"
   done
 fi
