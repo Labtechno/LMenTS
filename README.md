@@ -17,7 +17,6 @@ Projet indépendant, sans lien avec le fabricant du module.
 | 4 | Temps d'accès mémoire, jauge d'occupation du processeur, craquements en cas de surcharge | fait |
 | 5 | Optimisation, installateur Mac définitif, version Windows et son installateur | fait |
 | 6 | Interface définitive (maquette D : façade + matrice MIDI → CV) | fait |
-| 7 | Dossier « EFFET SUR POTENTIOMETRE » (mesures avec l'émulateur) | à faire |
 
 ## Installer la version d'essai
 
