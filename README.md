@@ -15,7 +15,7 @@ Projet indépendant, sans lien avec le fabricant du module.
 | 2 | Périphériques de la puce, carte du module, plugin : le firmware démarre, les potards, les CV, les LED et le son marchent | fait (version d'essai) |
 | 3 | Mémoire séparée par firmware, firmwares personnels, finitions du chargement | à faire |
 | 4 | Temps d'accès mémoire, jauge d'occupation du processeur fiable, craquements en cas de surcharge | à faire |
-| 5 | Optimisation, installateur définitif | à faire |
+| 5 | Optimisation, installateur Mac définitif, version Windows et son installateur | à faire |
 
 ## Installer la version d'essai
 
