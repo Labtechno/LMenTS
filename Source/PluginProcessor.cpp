@@ -252,6 +252,9 @@ void LmentsAudioProcessor::boot(const Memory* memory) {
   machine_.powerOn();
   bootCycles_ = loadCycles_ = machine_.cycles();
   loadIdle_ = machine_.cpu().handlerCycles();
+  overrunsSeen_ = machine_.overruns();
+  overloadHold_ = 0.0;
+  blockPeak_ = 0.0f;
   moduleCrashed_.store(false);
   problem_.store(0);
   hasFirmware_.store(true);
@@ -393,7 +396,11 @@ void LmentsAudioProcessor::pullModuleBlock(float* left, float* right) {
       inL[i] = toCodec(turquoise);
     }
   }
+  const uint64_t c0 = machine_.cycles(), h0 = machine_.cpu().handlerCycles();
   machine_.run(inL, inR, outL, outR, kBlock);
+  // Charge sur ce bloc (16 échantillons, la taille des blocs du firmware).
+  const uint64_t span = machine_.cycles() - c0;
+  if (span > 0) blockPeak_ = std::max(blockPeak_, static_cast<float>(machine_.cpu().handlerCycles() - h0) / static_cast<float>(span));
   for (int i = 0; i < kBlock; ++i) {
     left[i] = static_cast<float>(outL[i]) * (1.0f / 32768.0f);
     right[i] = static_cast<float>(outR[i]) * (1.0f / 32768.0f);
@@ -471,9 +478,16 @@ void LmentsAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
       // documentation du processeur (voir CortexM4.cpp), pas d'une mesure.
       const uint64_t busy = machine_.cpu().handlerCycles();
       moduleLoad_.store(static_cast<float>(busy - loadIdle_) / static_cast<float>(cycles - loadCycles_));
+      moduleLoadPeak_.store(std::min(1.0f, blockPeak_));
+      blockPeak_ = 0.0f;
       loadCycles_ = cycles;
       loadIdle_ = busy;
     }
+    // Blocs manqués : alerte affichée pendant deux secondes après le dernier.
+    const uint32_t overruns = machine_.overruns();
+    if (overruns != overrunsSeen_) { overrunsSeen_ = overruns; overloadHold_ = 2.0; }
+    else overloadHold_ = std::max(0.0, overloadHold_ - static_cast<double>(numSamples) / hostSampleRate_);
+    moduleOverloaded_.store(overloadHold_ > 0.0);
   } else {
     ledPlay_.store(false); ledExciter_.store(0.0f); ledResonator_.store(0.0f);
     moduleLoad_.store(0.0f);

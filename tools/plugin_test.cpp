@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
 #include "../Source/PluginProcessor.h"
@@ -376,6 +377,32 @@ int main(int argc, char** argv) {
     fake.deleteFile();
   }
   firmwareB.deleteFile();
+
+  // --- Jauge et surcharge (facultatif : firmware plus lourd, voir tools/build_firmware.sh) ---
+  if (const char* heavy = std::getenv("LMENTS_HEAVY_FIRMWARE")) {
+    std::printf("Surcharge :\n");
+    for (const juce::String path : { juce::String(argv[1]), juce::String(heavy) }) {
+      LmentsAudioProcessor r;
+      r.setPlayConfigDetails(2, 2, kRate, kBlock);
+      r.prepareToPlay(kRate, kBlock);
+      r.loadFirmwareFile(juce::File(path));
+      // Réglage le plus lourd : note tenue très grave, trois excitateurs, réverbération.
+      setParam(r, "bow", 0.8f); setParam(r, "blow", 0.8f); setParam(r, "strike", 0.8f);
+      setParam(r, "space", 0.9f); setParam(r, "coarse", 0.0f); setParam(r, "geometry", 0.2f);
+      render(r, 3.0);
+      juce::MidiBuffer midi;
+      midi.addEvent(juce::MidiMessage::noteOn(1, 36, static_cast<juce::uint8>(100)), 0);
+      render(r, 2.0, &midi);
+      std::printf("  %s : charge %.1f %%, pointe %.1f %%, blocs manques %u, alerte %d\n", juce::File(path).getFileName().toRawUTF8(),
+                  100.0f * r.moduleLoad(), 100.0f * r.moduleLoadPeak(), r.moduleOverruns(), r.moduleOverloaded());
+      if (path == juce::String(argv[1])) {
+        expect(r.moduleOverruns() == 0 && !r.moduleOverloaded() && r.moduleLoadPeak() < 0.99f, "firmware normal, reglage le plus lourd : pas de surcharge");
+        expect(r.moduleLoadPeak() >= r.moduleLoad() && r.moduleLoad() > 0.8f, "jauge : moyenne et pointe plausibles");
+      } else {
+        expect(r.moduleOverruns() > 0 && r.moduleOverloaded() && r.moduleLoadPeak() > 0.99f, "firmware trop lourd : le plugin signale la surcharge");
+      }
+    }
+  }
 
   std::printf(failures ? "DES ECHECS\n" : "OK\n");
   return failures ? 1 : 0;

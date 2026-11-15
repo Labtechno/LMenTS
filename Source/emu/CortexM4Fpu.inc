@@ -174,6 +174,51 @@ uint32_t CortexM4::fpMulAdd(uint32_t addend, uint32_t a, uint32_t b) {
   return fpSlow(kSlowMulAdd, a, b, addend);
 }
 
+// Durée des opérations de calcul (en plus du cycle de base compté par step()).
+//
+// Manuel technique du Cortex-M4 (r0p1), §7.2.3 : VADD, VMUL, conversions : 1 cycle ;
+// VMLA, VFMA et leurs variantes : 3 ; VDIV, VSQRT : 14. Une opération de calcul
+// prend un cycle de plus si son résultat sert à l'instruction suivante, sauf comme
+// accumulateur d'une multiplication-addition (lu un cycle plus tard).
+// Mesure publiée sur un STM32F4 (forum ARM, « VFMA instruction timings on
+// Cortex-M4 ») : des VFMA indépendantes qui se suivent coûtent 3, 2, 2, 2 cycles.
+// On compte donc 2 cycles pour une multiplication-addition qui en suit une autre.
+//
+// Chargements et rangements flottants (VLDR / VSTR) : 2 cycles d'après le manuel ;
+// comptés ici comme les chargements ordinaires, qui se chevauchent quand ils se
+// suivent (1 cycle chacun après le premier). Le manuel ne dit rien de ce
+// chevauchement pour les flottants : ce choix est recalé sur le seul repère connu
+// pour Elements, un commentaire de son auteur dans le code (voice.cc : 52 modes de
+// résonance dans le firmware, 56 « tourne extrêmement juste »). Sans lui, le
+// firmware officiel déborderait dans le cas le plus lourd, ce que le vrai module
+// ne fait pas. Voir tools/machine_test.cpp (commande cpu).
+// Durée des instructions rares du groupe « autres » (VABS, VCMP, conversions...).
+// `last` : registre écrit par l'opération de calcul juste avant (0xff si aucune).
+LMENTS_NOINLINE void CortexM4::fpOtherTiming(uint32_t hw1, uint32_t hw2, uint32_t d, uint32_t m, uint32_t last) {
+  bool producer = true;
+  uint64_t extra = 0;
+  if (!(hw2 & 0x40)) {
+    producer = false;                         // VMOV immédiat
+  } else {
+    switch (hw1 & 15) {
+      case 0: producer = (hw2 & 0x80) != 0; extra = m == last; break;                 // VABS / VMOV
+      case 1: extra = m == last; break;                                               // VSQRT / VNEG
+      case 4: case 5: producer = false; extra = d == last || (!(hw1 & 1) && m == last); break;   // VCMP
+      case 10: case 11: case 14: case 15: extra = d == last; break;                  // VCVT virgule fixe
+      default: extra = m == last; break;                                              // autres conversions
+    }
+  }
+  cycles_ += extra;
+  fpLastDest_ = producer ? d : 0xffu;
+  fpLastMac_ = false;
+}
+
+// Un rangement ou un transfert vers un registre ordinaire qui lit le résultat de
+// l'opération précédente attend lui aussi un cycle.
+inline void CortexM4::fpConsume(uint32_t reg) {
+  if (fpLastAt_ + 1 == instructions_ && reg == fpLastDest_) ++cycles_;
+}
+
 // Opérations de calcul (VADD, VMUL, VCVT...), simple précision uniquement.
 void CortexM4::execFpData(uint32_t insn) {
   ++changes_;   // une boucle d'attente ne calcule pas en flottant
@@ -185,38 +230,56 @@ void CortexM4::execFpData(uint32_t insn) {
   const bool op = hw2 & 0x40;
   const uint32_t sm = s_[m];
   uint32_t env;
+  // Durées : voir le commentaire au début de ce fichier (« Durée des opérations »).
+  const bool chained = fpLastAt_ + 1 == instructions_;
+  const uint32_t last = chained ? fpLastDest_ : 0xffu;
+  const uint64_t macCycles = ((chained && fpLastMac_) ? 1 : 2) + (n == last || m == last);
+  const uint64_t arithCycles = n == last || m == last;
+  fpLastAt_ = instructions_;
 
   switch ((hw1 >> 4) & 0xb) {
     case 0x0: {  // VMLA / VMLS
+      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
       uint32_t p = fpMul(s_[n], sm);
       if (op) p ^= kSign;
       s_[d] = fpAdd(s_[d], p);
-      cycles_ += 2;
       return;
     }
     case 0x1: {  // VNMLS / VNMLA
+      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
       uint32_t p = fpMul(s_[n], sm);
       if (op) p ^= kSign;
       s_[d] = fpAdd(s_[d] ^ kSign, p);
-      cycles_ += 2;
       return;
     }
-    case 0x2: s_[d] = fpMul(s_[n], sm) ^ (op ? kSign : 0); return;        // VMUL / VNMUL
-    case 0x3: s_[d] = op ? fpSub(s_[n], sm) : fpAdd(s_[n], sm); return;   // VADD / VSUB
+    case 0x2:   // VMUL / VNMUL
+      cycles_ += arithCycles; fpLastDest_ = d; fpLastMac_ = false;
+      s_[d] = fpMul(s_[n], sm) ^ (op ? kSign : 0);
+      return;
+    case 0x3:   // VADD / VSUB
+      cycles_ += arithCycles; fpLastDest_ = d; fpLastMac_ = false;
+      s_[d] = op ? fpSub(s_[n], sm) : fpAdd(s_[n], sm);
+      return;
     case 0x8:
       if (op) break;
+      cycles_ += arithCycles; fpLastDest_ = d; fpLastMac_ = false;
       s_[d] = fpDiv(s_[n], sm);
       cycles_ += 13;
       return;
     case 0x9:  // VFNMS / VFNMA
+      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
       s_[d] = fpMulAdd(s_[d] ^ kSign, op ? (s_[n] ^ kSign) : s_[n], sm);
-      cycles_ += 2;
       return;
     case 0xa:  // VFMA / VFMS
+      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
       s_[d] = fpMulAdd(s_[d], op ? (s_[n] ^ kSign) : s_[n], sm);
-      cycles_ += 2;
       return;
     case 0xb: {
+      // VMOV entre registres et VMOV immédiat, les plus fréquents, traités ici.
+      if (!op) fpLastDest_ = 0xffu;
+      else if ((hw1 & 15) == 0 && !(hw2 & 0x80)) { cycles_ += m == last; fpLastDest_ = 0xffu; }
+      else fpOtherTiming(hw1, hw2, d, m, last);
+      fpLastMac_ = false;
       if (!op) {  // VMOV immédiat
         const uint32_t imm8 = ((hw1 & 15) << 4) | (hw2 & 15);
         const uint32_t b6 = (imm8 >> 6) & 1;
@@ -330,7 +393,7 @@ void CortexM4::execCoprocessor(uint32_t insn) {
     if (!dbl) {
       if (a == 0) {  // VMOV Sn <-> Rt
         const uint32_t n = ((hw1 & 15) << 1) | ((hw2 >> 7) & 1);
-        if (toCore) r_[rt] = s_[n]; else s_[n] = r_[rt];
+        if (toCore) { fpConsume(n); r_[rt] = s_[n]; } else s_[n] = r_[rt];
         return;
       }
       if (a == 7 && (hw1 & 15) == 1) {  // VMRS / VMSR
@@ -391,8 +454,8 @@ void CortexM4::execCoprocessor(uint32_t insn) {
       cycles_ += 2;
     } else {
       const uint32_t reg = (vd << 1) | static_cast<uint32_t>(dBit);
-      if (load) s_[reg] = read32(address); else write32(address, s_[reg]);
-      ++cycles_;
+      if (load) s_[reg] = read32(address); else { fpConsume(reg); write32(address, s_[reg]); }
+      accessCycle();
     }
     return;
   }

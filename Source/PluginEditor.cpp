@@ -147,10 +147,10 @@ void LmentsAudioProcessorEditor::resized() {
   loadButton_.setBounds(left, 64, width - 96, 26);
   recentButton_.setBounds(left + width - 90, 64, 90, 26);
   resetButton_.setBounds(left, 116, 150, 24);
-  gateSource_.setBounds(left + 110, 286, width - 110, 22);
-  bendRange_.setBounds(left + 110, 310, width - 110, 22);
+  gateSource_.setBounds(left + 110, 292, width - 110, 22);
+  bendRange_.setBounds(left + 110, 316, width - 110, 22);
   for (size_t i = 0; i < kCvs.size(); ++i) {
-    const int y = 356 + 27 * static_cast<int>(i);
+    const int y = 362 + 27 * static_cast<int>(i);
     cvSources_[i].setBounds(left + 110, y, 104, 22);
     cvValues_[i].setBounds(left + 218, y, width - 218, 22);
   }
@@ -317,28 +317,43 @@ void LmentsAudioProcessorEditor::paintSide(juce::Graphics& g) {
   }
 
   title("Charge", 180);
-  auto gauge = [&](const juce::String& text, float value, int y, const juce::String& suffix) {
+  auto gauge = [&](const juce::String& text, float value, float peak, int y, const juce::String& suffix) {
     row(text, y);
     const juce::Rectangle<int> bar(left + 110, y + 6, width - 110 - 52, 10);
     g.setColour(juce::Colour(0xff3a3b41));
     g.fillRoundedRectangle(bar.toFloat(), 3.0f);
     const float clipped = juce::jlimit(0.0f, 1.0f, value);
-    g.setColour(value > 0.999f ? juce::Colour(0xffff5a4a) : (value > 0.9f ? juce::Colour(0xffffb23c) : juce::Colour(0xff5fd08a)));
+    const float worst = std::max(value, peak);
+    g.setColour(worst > 0.999f ? juce::Colour(0xffff5a4a) : (worst > 0.9f ? juce::Colour(0xffffb23c) : juce::Colour(0xff5fd08a)));
     g.fillRoundedRectangle(bar.toFloat().withWidth(static_cast<float>(bar.getWidth()) * clipped), 3.0f);
+    if (peak > 0.0f) {   // pointe : un trait
+      const float x = static_cast<float>(bar.getX()) + static_cast<float>(bar.getWidth()) * juce::jlimit(0.0f, 1.0f, peak);
+      g.fillRect(juce::Rectangle<float>(x - 1.0f, static_cast<float>(bar.getY()) - 2.0f, 2.0f, static_cast<float>(bar.getHeight()) + 4.0f));
+    }
     g.setColour(kSideText);
     g.drawText(suffix, bar.getRight() + 6, y, 46, 22, juce::Justification::centredRight, false);
   };
-  const float moduleLoad = processor_.moduleLoad(), hostLoad = processor_.hostLoad();
-  gauge(utf8("Puce du module"), moduleLoad, 204, juce::String(juce::roundToInt(moduleLoad * 100.0f)) + " %");
-  gauge(utf8("Ce Mac (1 c\xc5\x93ur)"), hostLoad, 228, juce::String(juce::roundToInt(hostLoad * 100.0f)) + " %");
+  const float moduleLoad = processor_.moduleLoad(), modulePeak = processor_.moduleLoadPeak(), hostLoad = processor_.hostLoad();
+  gauge(utf8("Puce du module"), moduleLoad, modulePeak, 204, juce::String(juce::roundToInt(moduleLoad * 100.0f)) + " %");
+  gauge(utf8("Ce Mac (1 c\xc5\x93ur)"), hostLoad, 0.0f, 228, juce::String(juce::roundToInt(hostLoad * 100.0f)) + " %");
+  g.setFont(juce::FontOptions(11.0f));
+  if (processor_.moduleOverloaded()) {
+    g.setColour(juce::Colour(0xffff5a4a));
+    g.drawText(utf8("Surcharge : le module craque (") + juce::String(processor_.moduleOverruns()) + utf8(" blocs manqu\xc3\xa9s)"),
+               left, 250, width, 14, juce::Justification::centredLeft, true);
+  } else if (processor_.hasFirmware()) {
+    g.setColour(kSideDim);
+    g.drawText(utf8("pointe ") + juce::String(juce::roundToInt(modulePeak * 100.0f)) + utf8(" % (estimation, voir README)"),
+               left, 250, width, 14, juce::Justification::centredLeft, true);
+  }
 
-  title(utf8("Interface MIDI \xe2\x86\x92 CV"), 260);
-  row("GATE", 286);
-  row("Pitch bend", 310);
+  title(utf8("Interface MIDI \xe2\x86\x92 CV"), 264);
+  row("GATE", 292);
+  row("Pitch bend", 316);
   g.setColour(kSideDim);
   g.setFont(juce::FontOptions(11.0f));
-  g.drawText(utf8("V/OCT : notes MIDI (0 V = note 36)"), left, 334, width, 18, juce::Justification::centredLeft, false);
-  for (size_t i = 0; i < kCvs.size(); ++i) row(kCvs[i].label, 356 + 27 * static_cast<int>(i));
+  g.drawText(utf8("V/OCT : notes MIDI (0 V = note 36)"), left, 340, width, 18, juce::Justification::centredLeft, false);
+  for (size_t i = 0; i < kCvs.size(); ++i) row(kCvs[i].label, 362 + 27 * static_cast<int>(i));
 }
 
 void LmentsAudioProcessorEditor::paint(juce::Graphics& g) {

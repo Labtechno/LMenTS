@@ -33,8 +33,11 @@ jobs:
         run: bash tools/armtests/run_tests.sh
       - name: Les programmes enregistres donnent le meme resultat
         run: bash tools/armtests/run_prebuilt.sh clang++
-      - name: Firmware Elements recompile depuis ses sources
-        run: bash tools/build_firmware.sh firmware-build
+      - name: Firmware Elements recompile depuis ses sources (52 modes, et 56 et 64 pour la charge)
+        run: |
+          bash tools/build_firmware.sh firmware-build
+          bash tools/build_firmware.sh firmware-build 56
+          bash tools/build_firmware.sh firmware-build 64
       - name: Module complet (demarrage, accord, vitesse)
         run: |
           cmake -B build -DLMENTS_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
@@ -42,10 +45,17 @@ jobs:
           ./build/lments_machine_test firmware-build/elements-source.bin boot
           ./build/lments_machine_test firmware-build/elements-source.bin pitch
           ./build/lments_machine_test firmware-build/elements-source.bin speed
+      - name: Charge de la puce (repere de l'auteur - 52 modes passe, 56 tres juste)
+        run: |
+          ./build/lments_machine_test firmware-build/elements-source.bin cpu 99
+          ./build/lments_machine_test firmware-build/elements-56modes.bin cpu 100
+          ./build/lments_machine_test firmware-build/elements-64modes.bin cpu
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-de-test
-          path: firmware-build/elements-source.bin
+          path: |
+            firmware-build/elements-source.bin
+            firmware-build/elements-64modes.bin
 
   mac:
     name: Plugin et installateur (Mac)
@@ -68,7 +78,8 @@ jobs:
         run: |
           sysctl -n machdep.cpu.brand_string
           printf 'pas un firmware' > invalide.bin
-          ./build/lments_plugin_test_artefacts/Release/lments_plugin_test firmware-build/elements-source.bin invalide.bin
+          LMENTS_HEAVY_FIRMWARE=firmware-build/elements-64modes.bin \
+            ./build/lments_plugin_test_artefacts/Release/lments_plugin_test firmware-build/elements-source.bin invalide.bin
           ./build/lments_machine_test firmware-build/elements-source.bin speed
 
       - name: Processeur emule sur Mac (Apple Silicon, puis Intel via Rosetta)
@@ -113,7 +124,7 @@ jobs:
         run: |
           VERSION="$(sed -n 's/^project(LMenTS VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
           cat > notes.md <<NOTES
-          Version $VERSION, compilée le $(date -u '+%d/%m/%Y') depuis la branche emulation (${GITHUB_SHA::7}). Version d'essai (étape 3).
+          Version $VERSION, compilée le $(date -u '+%d/%m/%Y') depuis la branche emulation (${GITHUB_SHA::7}). Version d'essai (étape 4).
 
           ## Installation
 

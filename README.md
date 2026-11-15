@@ -14,7 +14,7 @@ Projet indépendant, sans lien avec le fabricant du module.
 | 1 | Processeur Cortex-M4F émulé, avec ses tests | fait |
 | 2 | Périphériques de la puce, carte du module, plugin : le firmware démarre, les potards, les CV, les LED et le son marchent | fait (version d'essai) |
 | 3 | Chargement des firmwares, mémoire séparée par firmware, sauvée dans le projet | fait |
-| 4 | Temps d'accès mémoire, jauge d'occupation du processeur fiable, craquements en cas de surcharge | à faire |
+| 4 | Temps d'accès mémoire, jauge d'occupation du processeur, craquements en cas de surcharge | fait |
 | 5 | Optimisation, installateur Mac définitif, version Windows et son installateur | à faire |
 
 ## Installer la version d'essai
@@ -45,8 +45,52 @@ Aucun firmware n'est fourni avec le plugin.
   un paramètre automatisable, donc pilotable par le CV Programmer de Reason.
 - **Accord** : avec COARSE à sa position par défaut, la note jouée au clavier est
   la note entendue (vérifié : la 3 = 220,0 Hz).
-- **Jauges** : occupation de la puce du module (estimation) et part d'un cœur de
-  ton Mac utilisée par l'émulation.
+- **Jauges** : occupation de la puce du module (moyenne en barre, pointe en
+  trait ; voir « La charge de la puce » ci-dessous) et part d'un cœur de ton Mac
+  utilisée par l'émulation. En cas de surcharge, le plugin l'écrit en rouge.
+
+## La charge de la puce
+
+Le firmware calcule le son par blocs de 16 échantillons (un demi-milliseconde) :
+chaque bloc doit être fini avant que le suivant ne soit joué. La jauge « Puce du
+module » montre la part du temps que le firmware passe à calculer, en moyenne et
+au pire bloc (la pointe). Si un bloc n'est pas prêt à temps, le son du module
+craque, comme sur le vrai : rien n'est arrangé, c'est le transfert audio émulé
+qui continue sans attendre le firmware. Le plugin l'écrit alors en rouge.
+
+Pour estimer ce temps, l'émulateur compte les cycles d'horloge de chaque
+instruction, plus les attentes de la mémoire flash :
+
+- **flash** (manuel de référence du STM32F405) : 5 cycles d'attente à 168 MHz,
+  cache d'instructions de 64 lignes de 16 octets, cache de données de 8 lignes,
+  comme le firmware les règle. Chaque bloc de son fait passer environ 13 Ko de
+  code : le cache (1 Ko) ne suffit pas, et la flash coûte environ 5 % du temps ;
+- **instructions** : durées du manuel technique du Cortex-M4, y compris l'attente
+  d'un cycle quand un calcul flottant sert à l'instruction suivante ; plus une
+  mesure publiée sur un STM32F4 (des multiplications-additions qui se suivent
+  coûtent 2 cycles au lieu de 3) ;
+- **un choix recalé** : les chargements flottants qui se suivent sont comptés
+  comme les chargements ordinaires (ils se chevauchent). Le manuel ne le dit pas ;
+  ce choix est le seul qui respecte le repère connu ci-dessous.
+
+**Le repère** : dans le code du firmware (voice.cc), l'auteur règle le résonateur
+à 52 modes et note que 56 « tourne extrêmement juste ». Avec
+`tools/build_firmware.sh`, on fabrique le même firmware avec 48 à 64 modes, et
+on mesure le cas le plus lourd (note tenue très grave, trois excitateurs,
+réverbération ; `machine_test <firmware> cpu`) :
+
+| Modes du résonateur | Pointe de charge | Blocs manqués |
+|---|---|---|
+| 48 | 88 % | 0 |
+| 52 (firmware officiel, recompilé) | 92 % | 0 |
+| 52 (fichier officiel v1.1) | 94 % | 0 |
+| 56 | 96 % | 0 |
+| 60 | 99 % | 0 |
+| 64 | 100 % | une centaine sur 2 s, son qui craque |
+
+Ces chiffres restent une **estimation** : aucun n'a été mesuré sur un vrai
+module. Avec les durées du manuel seules, le firmware officiel déborderait dans
+ce cas lourd, ce que le vrai module ne fait pas.
 
 ## Firmwares et mémoire
 
@@ -132,16 +176,24 @@ et elles montrent pourquoi émuler la puce vaut mieux que recompiler le code :
 - **Rien n'a été essayé dans Reason** ni sur ton Mac : les essais du plugin
   tournent sur GitHub, sans logiciel hôte.
 - **Rien n'a été comparé à un vrai module.**
-- **La jauge de la puce du module** affiche environ 98 % : d'après les durées
-  d'instructions de la documentation, le firmware occupe presque toute la puce.
-  L'auteur du firmware note lui-même que le réglage choisi tourne « très juste ».
-  Le temps d'accès à la mémoire flash n'est pas encore compté : la jauge reste une
-  estimation jusqu'à l'étape 4.
-- **La vitesse sur un M4 Max** : environ 85 à 100 % d'un cœur du Mac M1 de GitHub
-  par instance (voir l'onglet Actions). Un M4 Max est nettement plus rapide par
-  cœur, mais ce n'est pas mesuré.
+- **La jauge de la puce du module** est une estimation recalée sur un seul
+  repère (voir « La charge de la puce »), pas une mesure sur un vrai module.
+- **La vitesse sur un M4 Max** n'est pas mesurée. Le modèle de la flash et des
+  durées d'instructions a rendu l'émulateur environ 25 à 30 % plus lent qu'à
+  l'étape 3 ; l'optimisation est prévue à l'étape 5 (voir l'onglet Actions pour
+  la mesure sur le Mac M1 de GitHub).
 - **L'électronique analogique** (étages d'entrée, convertisseur audio, sortie) est
   idéale : les valeurs viennent des réglages d'usine du firmware, pas des schémas.
+
+## Ce qui est vérifié à l'étape 4
+
+| Essai | Résultat |
+|---|---|
+| Processeur après l'ajout des durées et de la flash (`armtests`) | toujours identique à QEMU et à l'ordinateur, bit pour bit |
+| Firmware officiel, réglage le plus lourd (`machine_test cpu`, `plugin_test`) | pointe 92 à 94 %, aucun bloc manqué |
+| Firmware à 56 modes (« extrêmement juste » d'après l'auteur) | pointe 96 %, aucun bloc manqué |
+| Firmware à 64 modes | blocs manqués, sauts dans le son, alerte « Surcharge » dans le plugin |
+| Démarrage, accord, mémoire par firmware (étapes 2 et 3) | inchangés |
 
 ## Refaire les tests
 

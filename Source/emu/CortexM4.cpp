@@ -10,15 +10,28 @@
 //   MUL, multiplications 64 bits,             MLA / MLS ................... 2
 //   instructions DSP ............... 1        division .................... 2 à 12
 //   entrée / sortie d'interruption . 12
-//   flottants : + - x, comparaison, conversion 1 ; VMLA / VFMA 3 ; division et
-//   racine 14 ; VLDR / VSTR 2 (3 en 64 bits) ; VPUSH / VPOP / VLDM / VSTM 1 + N
+//   flottants : + - x, comparaison, conversion 1 ; VMLA / VFMA 3 (2 si elles se
+//   suivent) ; division et racine 14 ; + 1 si le résultat sert à l'instruction
+//   suivante ; VLDR / VSTR 2, chevauchés comme les chargements ordinaires ;
+//   VPUSH / VPOP / VLDM / VSTM 1 + N (détails et sources : CortexM4Fpu.inc)
 // Des chargements/rangements simples qui se suivent ne coûtent qu'un cycle chacun
 // après le premier (leurs phases d'adresse et de donnée se chevauchent).
 //
-// Mémoire flash : le modèle ci-dessous est celui du STM32F103 de Tresses (lecture
-// par blocs de 64 bits, tampon de lecture anticipée). Il est inactif tant qu'on ne
-// règle pas de cycles d'attente (setFlashTiming). Le modèle propre au STM32F405
-// (accélérateur « ART ») est prévu à l'étape 4.
+// Mémoire flash du STM32F405 (manuel de référence RM0090, §3.4 et §3.5.2) : elle
+// est lue par lignes de 128 bits (16 octets) ; une lecture prend 1 + N cycles, N
+// étant le nombre de cycles d'attente réglé par le firmware (5 à 168 MHz). Entre
+// la flash et le processeur, l'« accélérateur ART » :
+//   - les instructions sont prises dans la ligne courante sans attente ; en
+//     changeant de ligne, si elle est dans le cache d'instructions (64 lignes),
+//     sans attente non plus ; sinon elle est lue (N cycles de plus) et mise en
+//     cache, à la place de la ligne la moins récemment utilisée ;
+//   - avec la lecture anticipée (que le firmware d'Elements n'active pas), la
+//     ligne suivante est lue pendant l'exécution de la ligne courante ;
+//   - les données lues en flash (tables, constantes) passent par un cache de
+//     données de 8 lignes : N cycles de plus quand la ligne n'y est pas.
+// Les lectures en mémoire vive (et en mémoire CCM) se font sans attente.
+// Le manuel ne détaille pas tout (organisation exacte des caches, conflits entre
+// lecture d'instructions et de données) : c'est un modèle, non une mesure.
 
 #include "CortexM4.h"
 #include "SoftFloat.h"
@@ -136,7 +149,10 @@ inline uint32_t thumbExpandImm(uint32_t imm12, bool& carry) {
 
 CortexM4::CortexM4(size_t flashSize, size_t ramSize, Bus* bus, size_t ccmSize)
     : flash_(flashSize + 8, 0xff), ram_(ramSize + 8, 0), ccm_(ccmSize + 8, 0),
-      flashSize_(flashSize), ramSize_(ramSize), ccmSize_(ccmSize), bus_(bus) {}
+      flashSize_(flashSize), ramSize_(ramSize), ccmSize_(ccmSize), bus_(bus) {
+  icache_.reset(64);
+  dcache_.reset(8);
+}
 
 // --- Mémoire -----------------------------------------------------------------------
 
@@ -144,7 +160,7 @@ uint32_t CortexM4::read32(uint32_t a) {
   uint32_t o = a - kRamBase;
   if (o <= ramSize_ - 4) { uint32_t v; std::memcpy(&v, &ram_[o], 4); return v; }
   o = a - kFlashBase;
-  if (o <= flashSize_ - 4) { if (flashWait_) flashDataRead(); uint32_t v; std::memcpy(&v, &flash_[o], 4); return v; }
+  if (o <= flashSize_ - 4) { if (flashWait_) flashDataRead(a); uint32_t v; std::memcpy(&v, &flash_[o], 4); return v; }
   return slowRead(a, 4);
 }
 
@@ -152,7 +168,7 @@ uint32_t CortexM4::read16(uint32_t a) {
   uint32_t o = a - kRamBase;
   if (o <= ramSize_ - 2) { uint16_t v; std::memcpy(&v, &ram_[o], 2); return v; }
   o = a - kFlashBase;
-  if (o <= flashSize_ - 2) { if (flashWait_) flashDataRead(); uint16_t v; std::memcpy(&v, &flash_[o], 2); return v; }
+  if (o <= flashSize_ - 2) { if (flashWait_) flashDataRead(a); uint16_t v; std::memcpy(&v, &flash_[o], 2); return v; }
   return slowRead(a, 2);
 }
 
@@ -160,15 +176,33 @@ uint32_t CortexM4::read8(uint32_t a) {
   uint32_t o = a - kRamBase;
   if (o < ramSize_) return ram_[o];
   o = a - kFlashBase;
-  if (o < flashSize_) { if (flashWait_) flashDataRead(); return flash_[o]; }
+  if (o < flashSize_) { if (flashWait_) flashDataRead(a); return flash_[o]; }
   return slowRead(a, 1);
 }
 
-// Lecture d'une donnée en flash : elle passe avant la lecture anticipée du code.
-void CortexM4::flashDataRead() {
-  const uint64_t before = cycles_;
+// Lecture d'une donnée en flash : sans attente si sa ligne est dans le cache de
+// données, sinon N cycles de plus.
+void CortexM4::flashDataRead(uint32_t address) {
+  if (dcacheOn_ && dcache_.access(address >> 4)) return;
+  ++dMisses_;
   cycles_ += flashWait_;
-  if (prefetchReady_ > before) prefetchReady_ += 1 + flashWait_;
+}
+
+void CortexM4::setFlashTiming(uint32_t waitStates, bool prefetch, bool instructionCache, bool dataCache) {
+  flashWait_ = waitStates;
+  flashPrefetch_ = prefetch;
+  if (instructionCache != icacheOn_) icache_.reset(64);
+  if (dataCache != dcacheOn_) dcache_.reset(8);
+  icacheOn_ = instructionCache;
+  dcacheOn_ = dataCache;
+  prefetchFlush_ = true;
+}
+
+void CortexM4::resetFlashCaches() {
+  icache_.reset(64);
+  dcache_.reset(8);
+  currentLine_ = ~0u;
+  prefetchFlush_ = true;
 }
 
 // Les écritures en RAM notent si la valeur a réellement changé : une boucle
@@ -817,37 +851,19 @@ void CortexM4::bxWritePc(uint32_t address) {
   branchTo(address);
 }
 
-// Attente de la flash, cas général : branchement, ou passage au bloc suivant.
-LMENTS_NOINLINE void CortexM4::flashFetch(uint32_t first, uint32_t last) {
-  const uint64_t access = 1 + flashWait_;
-  if (prefetchFlush_) {
-    // Après un branchement : le mot visé part en lecture à la fin du branchement.
-    prefetchFlush_ = false;
-    prefetchWord_ = first;
-    prefetchReady_ = cycles_ + flashWait_;
-    currentWord_ = first;
-    enteredCurrent_ = enteredPrevious_ = cycles_;
-  } else if (first != currentWord_) {
-    enteredPrevious_ = enteredCurrent_;
-    enteredCurrent_ = cycles_;
-    currentWord_ = first;
-  }
-  while (prefetchWord_ < last) {
-    ++prefetchWord_;
-    uint64_t start = prefetchReady_;
-    if (flashPrefetch_) {
-      // Deux mots d'avance au plus : le mot w n'est lu qu'une fois le
-      // processeur arrivé au mot w - 2.
-      const uint32_t gate = prefetchWord_ - 2;
-      const uint64_t entered = gate == currentWord_ ? enteredCurrent_
-                             : (gate + 1 == currentWord_ ? enteredPrevious_ : 0);
-      start = std::max(start, entered);
-    } else {
-      start = std::max(start, cycles_);   // sans lecture anticipée : à la demande
-    }
-    prefetchReady_ = start + access;
-  }
-  if (prefetchWord_ == last && prefetchReady_ > cycles_) cycles_ = prefetchReady_;
+// Les instructions passent à une autre ligne de 16 octets de la flash.
+LMENTS_NOINLINE void CortexM4::flashFetchLine(uint32_t line) {
+  if (line == currentLine_) { prefetchFlush_ = false; return; }   // branchement dans la ligne courante
+  const bool sequential = !prefetchFlush_ && line == currentLine_ + 1;
+  prefetchFlush_ = false;
+  currentLine_ = line;
+  const bool cached = icacheOn_ && icache_.access(line);
+  if (cached) return;
+  // Avec la lecture anticipée, la ligne suivante a été lue pendant l'exécution de
+  // la ligne courante (modèle simple : elle est prête).
+  if (sequential && flashPrefetch_) return;
+  ++iMisses_;
+  cycles_ += flashWait_;
 }
 
 LMENTS_FLATTEN void CortexM4::step() {
@@ -866,15 +882,14 @@ LMENTS_FLATTEN void CortexM4::step() {
   const uint32_t size = hw1 < 0xe800 ? 2 : 4;
 
   // Attente de la flash : l'instruction ne peut pas commencer avant que tous ses
-  // octets aient été lus.
+  // octets aient été lus (une instruction de 32 bits peut chevaucher deux lignes).
+  // Il suffit de regarder en entrant dans une ligne : après un branchement ou une
+  // interruption, au premier octet d'une ligne, ou pour une instruction à cheval.
   if (flashWait_ && inFlash) {
-    const uint32_t first = pc_ >> 3;
-    const uint32_t last = (pc_ + size - 1) >> 3;
-    if (!prefetchFlush_ && first == currentWord_ && last <= prefetchWord_) {
-      // Cas courant : on avance dans le même bloc de 8 octets, déjà demandé.
-      if (last == prefetchWord_ && prefetchReady_ > cycles_) cycles_ = prefetchReady_;
-    } else {
-      flashFetch(first, last);
+    const uint32_t offset = pc_ & 15;
+    if (__builtin_expect(prefetchFlush_ || offset == 0 || offset + size > 16, 0)) {
+      touchLine(pc_ >> 4);
+      if (offset + size > 16) touchLine((pc_ >> 4) + 1);
     }
   }
 

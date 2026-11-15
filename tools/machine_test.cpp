@@ -4,6 +4,8 @@
 //   machine_test <firmware.bin> play <out.wav>  joue quelques notes et écrit le son
 //   machine_test <firmware.bin> pitch           vérifie l'accord : 1 V par octave
 //   machine_test <firmware.bin> speed           vitesse de l'émulateur et charge du processeur émulé
+//   machine_test <firmware.bin> cpu [max %]      charge de la puce, bloc par bloc ; avec un maximum :
+//                                                échoue si la pointe le dépasse ou si un bloc manque
 //
 // Licence MIT.
 
@@ -261,6 +263,40 @@ int main(int argc, char** argv) {
       m.run(0.5);
     }
     expect(!m.machine.crashed(), "le processeur tourne");
+  } else if (cmd == "cpu") {
+    // Réglage le plus lourd : les trois excitateurs, la réverbération, une note tenue
+    // très grave (COARSE au minimum), géométrie peu étirée : toutes les résonances
+    // restent sous la moitié de la fréquence d'échantillonnage, donc sont calculées.
+    m.pots[hw::kPotBow] = 0.8f; m.pots[hw::kPotBlow] = 0.8f; m.pots[hw::kPotStrike] = 0.8f; m.pots[hw::kPotSpace] = 0.9f;
+    m.pots[hw::kPotCoarse] = 0.0f; m.pots[hw::kPotGeometry] = 0.2f;
+    m.run(1.0);
+    m.machine.controls.gate = true;
+    m.run(0.5);
+    auto& cpu = m.machine.cpu();
+    const uint32_t o0 = m.machine.overruns();
+    double sum = 0.0, peak = 0.0;
+    int blocks = 0;
+    // Bloc par bloc (16 échantillons = 0,5 ms) : part du temps passée en interruption.
+    for (int i = 0; i < 4000; ++i) {
+      const uint64_t c0 = m.machine.cycles(), h0 = cpu.handlerCycles();
+      int16_t l[16], r[16];
+      m.apply();
+      m.machine.run(nullptr, nullptr, l, r, 16);
+      const double load = static_cast<double>(cpu.handlerCycles() - h0) / static_cast<double>(m.machine.cycles() - c0);
+      sum += load; peak = std::max(peak, load); ++blocks;
+      if (i == 2000) m.machine.controls.gate = false;
+    }
+    const uint32_t missed = m.machine.overruns() - o0;
+    std::printf("  flash : %.0f lignes d'instructions et %.0f lignes de donnees lues par bloc (hors cache)\n",
+                static_cast<double>(cpu.flashInstructionMisses()) / static_cast<double>(m.machine.cpu().exceptionCount(30)),
+                static_cast<double>(cpu.flashDataMisses()) / static_cast<double>(m.machine.cpu().exceptionCount(30)));
+    std::printf("  charge moyenne %.1f %%, pointe %.1f %%, blocs manques %u (sur %d)\n", 100.0 * sum / blocks, 100.0 * peak, missed, blocks);
+    if (argc > 3) {
+      const double limit = std::atof(argv[3]);
+      char what[96];
+      std::snprintf(what, sizeof(what), "pointe sous %.0f %% et aucun bloc manque", limit);
+      expect(100.0 * peak <= limit && missed == 0, what);
+    }
   } else {
     std::fprintf(stderr, "commande inconnue\n");
     return 2;

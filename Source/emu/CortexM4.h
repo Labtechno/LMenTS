@@ -71,14 +71,16 @@ class CortexM4 {
   // Le processeur est bloqué pendant `cycles` (écriture en flash, par exemple).
   void stall(uint64_t cycles) { cycles_ += cycles; }
 
-  // Temps d'accès de la mémoire flash, tels que le firmware les programme dans le
-  // registre FLASH_ACR : nombre de cycles d'attente par lecture (2 à 72 MHz sur un
-  // STM32F103 ; modèle repris de Tresses, à refaire pour le STM32F405) et tampon de lecture anticipée. 0 cycle d'attente = flash idéale.
-  void setFlashTiming(uint32_t waitStates, bool prefetch) {
-    flashWait_ = waitStates;
-    flashPrefetch_ = prefetch;
-    prefetchFlush_ = true;
-  }
+  // Mémoire flash du STM32F405 et son « accélérateur ART », tels que le firmware
+  // les règle dans le registre FLASH_ACR (voir le modèle dans CortexM4.cpp) :
+  // cycles d'attente par lecture (5 à 168 MHz), lecture anticipée, cache
+  // d'instructions (64 lignes de 16 octets), cache de données (8 lignes).
+  // 0 cycle d'attente = flash idéale.
+  void setFlashTiming(uint32_t waitStates, bool prefetch, bool instructionCache, bool dataCache);
+  void resetFlashCaches();
+  // Lectures de la flash qui n'ont pas trouvé leur ligne en cache (pour les mesures).
+  uint64_t flashInstructionMisses() const { return iMisses_; }
+  uint64_t flashDataMisses() const { return dMisses_; }
 
   // Interruptions externes (numéro d'IRQ du STM32, 0..81).
   void setIrqPending(int irq, bool pending);
@@ -123,6 +125,8 @@ class CortexM4 {
   void execParallel(uint32_t insn);
   void execCoprocessor(uint32_t insn);
   void execFpData(uint32_t insn);
+  void fpOtherTiming(uint32_t hw1, uint32_t hw2, uint32_t d, uint32_t m, uint32_t last);
+  void fpConsume(uint32_t reg);
   bool fpCheck();
   void preserveFpState();
   void setFpscr(uint32_t v) {
@@ -188,7 +192,10 @@ class CortexM4 {
   // petits nombres (dénormalisés) peuvent alors eux aussi être calculés par l'ordinateur.
   bool fpAnyFinite_ = false;
   bool controlFpca_ = false;
-  bool fpReady_ = false;   // les vérifications d'accès aux flottants sont déjà faites
+  bool fpReady_ = false;
+  uint32_t fpLastDest_ = 0xffu;   // registre écrit par la dernière opération de calcul flottante
+  uint64_t fpLastAt_ = 0;         // ... et son numéro d'instruction (voir execFpData)
+  bool fpLastMac_ = false;   // les vérifications d'accès aux flottants sont déjà faites
   uint32_t cpacr_ = 0;
   uint32_t fpccr_ = 0xc0000000u, fpcar_ = 0, fpdscr_ = 0;
   uint32_t itstate_ = 0;
@@ -227,18 +234,54 @@ class CortexM4 {
 
   bool exclusive_ = false;
 
-  // Modèle de la flash (voir step() et flashDataRead()).
+  // Modèle de la flash (voir step(), flashFetchLine() et flashDataRead()).
+  struct LineCache {
+    static constexpr int kMaxLines = 64;
+    static constexpr uint32_t kFlashLines = 1u << 16;   // 1 Mo de flash / 16 octets
+    int size = 0;                  // nombre de lignes (64 instructions, 8 données)
+    uint32_t tag[kMaxLines];       // numéro de ligne (adresse / 16), ~0 = vide
+    uint64_t used[kMaxLines];      // dernière utilisation, pour remplacer la plus ancienne
+    uint64_t clock = 0;
+    std::vector<int8_t> slot;      // pour chaque ligne de la flash : sa place en cache, ou -1
+    void reset(int lines) {
+      size = lines;
+      for (int i = 0; i < kMaxLines; ++i) { tag[i] = ~0u; used[i] = 0; }
+      slot.assign(kFlashLines, -1);
+    }
+    // Renvoie vrai si la ligne était présente ; sinon la place (en chassant la
+    // moins récemment utilisée).
+    bool access(uint32_t line) {
+      line &= kFlashLines - 1;
+      ++clock;
+      const int s = slot[line];
+      if (s >= 0) { used[s] = clock; return true; }
+      int oldest = 0;
+      for (int i = 1; i < size; ++i) if (used[i] < used[oldest]) oldest = i;
+      if (tag[oldest] != ~0u) slot[tag[oldest]] = -1;
+      tag[oldest] = line; used[oldest] = clock; slot[line] = static_cast<int8_t>(oldest);
+      return false;
+    }
+  };
   uint32_t flashWait_ = 0;
-  bool flashPrefetch_ = true;
-  bool prefetchFlush_ = true;       // un branchement a vidé le tampon de lecture anticipée
-  uint32_t prefetchWord_ = 0;       // dernier mot de 32 bits lu (ou en cours de lecture)
-  uint64_t prefetchReady_ = 0;      // cycle où ce mot est disponible
-  uint32_t currentWord_ = 0;        // mot où se trouve l'instruction en cours
-  uint64_t enteredCurrent_ = 0, enteredPrevious_ = 0;
+  bool flashPrefetch_ = false, icacheOn_ = false, dcacheOn_ = false;
+  bool prefetchFlush_ = true;       // un branchement a eu lieu (ligne courante à revérifier)
+  uint32_t currentLine_ = ~0u;      // ligne de 16 octets d'où viennent les instructions en cours
+  LineCache icache_, dcache_;
+  uint64_t iMisses_ = 0, dMisses_ = 0;
   bool pipelinedAccess_ = false;    // l'instruction précédente était un chargement/rangement simple
   bool previousAccess_ = false;
-  void flashDataRead();
-  void flashFetch(uint32_t first, uint32_t last);
+  void flashDataRead(uint32_t address);
+  void flashFetchLine(uint32_t line);
+  // Les instructions sont prises dans la ligne `line` : cas fréquents traités ici
+  // (même ligne, ou ligne présente dans le cache), les autres par flashFetchLine.
+  void touchLine(uint32_t line) {
+    if (line == currentLine_) { prefetchFlush_ = false; return; }
+    if (icacheOn_) {
+      const int8_t s = icache_.slot[line & (LineCache::kFlashLines - 1)];
+      if (s >= 0) { icache_.used[s] = ++icache_.clock; currentLine_ = line; prefetchFlush_ = false; return; }
+    }
+    flashFetchLine(line);
+  }
   // Cycle de donnée d'un chargement/rangement simple, absorbé si l'instruction
   // précédente en était un aussi.
   void accessCycle() {

@@ -110,12 +110,16 @@ class LmentsAudioProcessor : public juce::AudioProcessor {
   struct Leds { bool play = false; float exciter = 0.0f, resonator = 0.0f; };
   Leds leds() const;
 
-  // Occupation du processeur du module (0..1), part d'un cœur de cet ordinateur
-  // utilisée par l'émulation (0..1 et plus), blocs audio manqués par le firmware
-  // (surcharge du module), arrêt éventuel du processeur émulé.
+  // Occupation du processeur du module (0..1) : moyenne et pointe sur les blocs de
+  // son du dernier quart de seconde ; part d'un cœur de cet ordinateur utilisée
+  // par l'émulation (0..1 et plus) ; blocs audio que le firmware n'a pas calculés
+  // à temps (surcharge : le module craque), au total et depuis deux secondes ;
+  // arrêt éventuel du processeur émulé.
   float moduleLoad() const { return moduleLoad_.load(); }
+  float moduleLoadPeak() const { return moduleLoadPeak_.load(); }
   float hostLoad() const { return hostLoad_.load(); }
   uint32_t moduleOverruns() const { return moduleOverruns_.load(); }
+  bool moduleOverloaded() const { return moduleOverloaded_.load(); }
   bool moduleCrashed() const { return moduleCrashed_.load(); }
 
   // Tension présente sur chaque prise CV (pour l'affichage), et état de GATE.
@@ -174,8 +178,12 @@ class LmentsAudioProcessor : public juce::AudioProcessor {
 
   std::atomic<bool> ledPlay_ { false };
   std::atomic<float> ledExciter_ { 0.0f }, ledResonator_ { 0.0f };
-  std::atomic<float> moduleLoad_ { 0.0f }, hostLoad_ { 0.0f };
+  std::atomic<float> moduleLoad_ { 0.0f }, moduleLoadPeak_ { 0.0f }, hostLoad_ { 0.0f };
   std::atomic<uint32_t> moduleOverruns_ { 0 };
+  std::atomic<bool> moduleOverloaded_ { false };
+  float blockPeak_ = 0.0f;            // pointe depuis le dernier relevé
+  uint32_t overrunsSeen_ = 0;
+  double overloadHold_ = 0.0;         // secondes pendant lesquelles l'alerte reste affichée
   std::atomic<bool> moduleCrashed_ { false };
   uint64_t loadCycles_ = 0, loadIdle_ = 0;   // loadIdle_ : cycles passés en interruption au dernier relevé
   double hostSeconds_ = 0.0, audioSeconds_ = 0.0;

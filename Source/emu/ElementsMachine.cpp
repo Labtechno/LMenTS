@@ -129,7 +129,8 @@ void ElementsMachine::powerOn() {
   std::memset(tim1_, 0, sizeof(tim1_));
   tim1_[11] = 0xffff;
   flashAcr_ = 0; flashCr_ = 0x80000000u; flashKeyStep_ = 0;
-  cpu_.setFlashTiming(0, true);
+  cpu_.setFlashTiming(0, false, false, false);   // à la mise sous tension : flash sans attente, caches éteints
+  cpu_.resetFlashCaches();
   cpu_.reset();
   sampleNext_ = cpu_.cycles() + kFallbackSamplePeriod;
   reschedule();
@@ -596,7 +597,12 @@ void ElementsMachine::writeRegister(uint32_t a, uint32_t v) {
     case kRcc + 0x04: rccPllCfgr_ = v; updateAudioClock(); return;
     case kRcc + 0x08: rccCfgr_ = v; updateAudioClock(); return;
     case kRcc + 0x84: rccPllI2sCfgr_ = v; updateAudioClock(); return;
-    case kFlashReg + 0x00: flashAcr_ = v; return;
+    case kFlashReg + 0x00:
+      // FLASH_ACR : cycles d'attente, lecture anticipée, caches (et leur remise à zéro).
+      flashAcr_ = v & 0x0707u;
+      if (v & 0x1800u) cpu_.resetFlashCaches();
+      cpu_.setFlashTiming(v & 7, v & 0x100, v & 0x200, v & 0x400);
+      return;
     case kFlashReg + 0x04:
       // Déverrouillage : deux clés à la suite.
       if (v == 0x45670123u) flashKeyStep_ = 1;
