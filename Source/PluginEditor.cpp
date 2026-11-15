@@ -8,11 +8,15 @@ namespace {
 
 // La façade est décrite dans un repère de 455 x 345 points (ses proportions),
 // puis agrandie.
-constexpr float kScale = 2.0f;
-constexpr int kPanelWidth = 910, kPanelHeight = 690, kSideWidth = 350;
+constexpr float kScale = 1.5f;
+constexpr int kPanelWidth = 683, kPanelHeight = 518, kSideWidth = 560;
+constexpr int kSideMargin = 14, kRowsTop = 180, kRowHeight = 26;
 
 const juce::Colour kPanelColour(0xffdcdddf), kInk(0xff2c2c2e), kRed(0xffc0305a), kTurquoise(0xff2ba6a2);
-const juce::Colour kSideColour(0xff26272b), kSideText(0xffd8d8dc), kSideDim(0xff8c8d94);
+const juce::Colour kSideColour(0xff26272b), kSideText(0xffd8d8dc), kSideDim(0xff9a9ba2);
+const juce::Colour kTrack(0xff3a3b41), kControl(0xff34353b), kControlLine(0xff55565e), kRule(0xff33343a);
+const juce::Colour kJackLit(0xffffc531), kDot(0xff6a6b72);
+const char* const kSourceNames[] = { "Rien", "Molette", "V\xc3\xa9locit\xc3\xa9", "Aftertouch", "Automation" };
 
 enum KnobKind { kWhite, kRedKnob, kTurquoiseKnob };
 struct KnobPlace { float x, y, diameter; KnobKind kind; const char* label; };
@@ -69,8 +73,111 @@ void KnobLook::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int 
   g.fillPath(mark, juce::AffineTransform::rotation(angle).translated(centre));
 }
 
+// Curseurs horizontaux (pitch bend, tension en mode Automation) : un rail fin,
+// rempli depuis le zéro, et un repère clair.
+void KnobLook::drawLinearSlider(juce::Graphics& g, int x, int y, int width, int height, float position, float,
+                                float, juce::Slider::SliderStyle, juce::Slider& slider) {
+  const float cy = static_cast<float>(y) + 0.5f * static_cast<float>(height);
+  // Le rail occupe toute la largeur du curseur, comme les barres des autres prises.
+  const bool bare = slider.getTextBoxPosition() == juce::Slider::NoTextBox;
+  const float x0 = bare ? 0.0f : static_cast<float>(x), x1 = bare ? static_cast<float>(slider.getWidth()) : static_cast<float>(x + width);
+  g.setColour(kTrack);
+  g.fillRoundedRectangle(x0, cy - 2.0f, x1 - x0, 4.0f, 2.0f);
+  const double lo = slider.getMinimum(), hi = slider.getMaximum();
+  const float zero = lo < 0.0 && hi > 0.0 ? static_cast<float>(slider.getPositionOfValue(0.0)) : x0;
+  g.setColour(slider.isEnabled() ? juce::Colour(0xffc9cad0) : kDot);
+  g.fillRoundedRectangle(std::min(zero, position), cy - 2.0f, std::abs(position - zero), 4.0f, 2.0f);
+  g.setColour(juce::Colour(0xfff0f0f2));
+  g.fillRoundedRectangle(position - 2.0f, cy - 6.0f, 4.0f, 12.0f, 2.0f);
+}
+
+// --- Matrice Interface MIDI -> CV -----------------------------------------------------------
+
+CvMatrixRow::CvMatrixRow(LmentsAudioProcessor& p, size_t index)
+    : processor_(p), index_(index),
+      sourceAttachment_(*p.apvts.getParameter(cvSourceId(kCvs[index])),
+                        [this](float value) { source_ = juce::roundToInt(value); value_.setVisible(source_ == kNumSources - 1); repaint(); }) {
+  value_.setSliderStyle(juce::Slider::LinearHorizontal);
+  value_.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+  value_.setPopupDisplayEnabled(true, true, nullptr);
+  value_.setTooltip(utf8("Tension envoy\xc3\xa9" "e dans la prise (param\xc3\xa8tre automatisable)"));
+  addChildComponent(value_);
+  valueAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(p.apvts, cvValueId(kCvs[index]), value_);
+  sourceAttachment_.sendInitialUpdate();
+}
+
+juce::Rectangle<int> CvMatrixRow::meterArea() const {
+  const int x = kNameWidth + kNumSources * kColumnWidth + 8;
+  return { x, 0, getWidth() - x - 56, getHeight() };
+}
+
+void CvMatrixRow::resized() { value_.setBounds(meterArea()); }
+
+int CvMatrixRow::sourceAt(juce::Point<int> position) const {
+  const int column = (position.x - kNameWidth) / kColumnWidth;
+  return position.x >= kNameWidth && column < kNumSources ? column : -1;
+}
+
+void CvMatrixRow::mouseDown(const juce::MouseEvent& e) {
+  const int source = sourceAt(e.getPosition());
+  if (source >= 0 && source != source_) sourceAttachment_.setValueAsCompleteGesture(static_cast<float>(source));
+}
+
+void CvMatrixRow::refresh() {
+  const float volts = processor_.cvVolts(kCvs[index_].cv);
+  if (std::abs(volts - shownVolts_) > 0.005f) { shownVolts_ = volts; repaint(); }
+}
+
+void CvMatrixRow::paint(juce::Graphics& g) {
+  const float h = static_cast<float>(getHeight());
+  g.setColour(kRule);
+  g.fillRect(0, 0, getWidth(), 1);
+  // Nom de la prise, avec un petit voyant quand une tension y arrive.
+  const bool live = source_ != 0 && std::abs(shownVolts_) > 0.01f;
+  g.setColour(live ? kJackLit : kDot);
+  g.fillEllipse(0.0f, 0.5f * h - 3.0f, 6.0f, 6.0f);
+  g.setColour(kSideText);
+  g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+  g.drawText(kCvs[index_].label, 12, 0, kNameWidth - 12, getHeight(), juce::Justification::centredLeft, true);
+  // Les 5 sources : un point plein pour celle qui est branchée.
+  for (int j = 0; j < kNumSources; ++j) {
+    const float cx = static_cast<float>(kNameWidth + j * kColumnWidth) + 0.5f * kColumnWidth, cy = 0.5f * h, r = 7.0f;
+    if (j == source_) {
+      g.setColour(j == 0 ? kDot : kJackLit);
+      g.fillEllipse(cx - r, cy - r, 2 * r, 2 * r);
+    } else {
+      g.setColour(kDot);
+      g.drawEllipse(cx - r + 0.75f, cy - r + 0.75f, 2 * r - 1.5f, 2 * r - 1.5f, 1.5f);
+    }
+  }
+  // Tension : curseur en mode Automation (dessiné par le Slider), sinon barre en direct.
+  const auto meter = meterArea().toFloat();
+  if (source_ != kNumSources - 1) {
+    const float cy = 0.5f * h, zero = meter.getCentreX();
+    g.setColour(kTrack);
+    g.fillRoundedRectangle(meter.getX(), cy - 2.0f, meter.getWidth(), 4.0f, 2.0f);
+    const float end = zero + 0.5f * meter.getWidth() * juce::jlimit(-1.0f, 1.0f, shownVolts_ / 5.0f);
+    g.setColour(juce::Colour(0xffc9cad0));
+    g.fillRoundedRectangle(std::min(zero, end), cy - 2.0f, std::abs(end - zero), 4.0f, 2.0f);
+  }
+  g.setColour(source_ == 0 ? kDot : kSideText);
+  g.setFont(juce::FontOptions(11.0f));
+  g.drawText((shownVolts_ > 0.0049f ? "+" : "") + juce::String(shownVolts_, 2) + " V", getWidth() - 54, 0, 54, getHeight(),
+             juce::Justification::centredRight, false);
+}
+
 LmentsAudioProcessorEditor::LmentsAudioProcessorEditor(LmentsAudioProcessor& p)
     : AudioProcessorEditor(&p), processor_(p) {
+  // Couleurs des menus, boutons et cases du panneau de droite.
+  knobLook_.setColour(juce::ComboBox::backgroundColourId, kControl);
+  knobLook_.setColour(juce::ComboBox::outlineColourId, kControlLine);
+  knobLook_.setColour(juce::ComboBox::textColourId, juce::Colour(0xffe8e8ec));
+  knobLook_.setColour(juce::ComboBox::arrowColourId, kSideText);
+  knobLook_.setColour(juce::TextButton::buttonColourId, kControl);
+  knobLook_.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffe8e8ec));
+  knobLook_.setColour(juce::Slider::textBoxBackgroundColourId, kControl);
+  knobLook_.setColour(juce::Slider::textBoxOutlineColourId, kControlLine);
+  knobLook_.setColour(juce::Slider::textBoxTextColourId, juce::Colour(0xffe8e8ec));
   setLookAndFeel(&knobLook_);
   for (size_t i = 0; i < knobs_.size(); ++i) {
     auto& knob = knobs_[i];
@@ -108,19 +215,13 @@ LmentsAudioProcessorEditor::LmentsAudioProcessorEditor(LmentsAudioProcessor& p)
   addAndMakeVisible(gateSource_);
   gateSourceAttachment_ = std::make_unique<ComboAttachment>(processor_.apvts, ids::gateSource, gateSource_);
   bendRange_.setSliderStyle(juce::Slider::LinearHorizontal);
-  bendRange_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 86, 20);
+  bendRange_.setTextBoxStyle(juce::Slider::TextBoxRight, false, 84, 20);
   addAndMakeVisible(bendRange_);
   bendRangeAttachment_ = std::make_unique<SliderAttachment>(processor_.apvts, ids::bendRange, bendRange_);
 
-  const juce::StringArray sources { utf8("Rien"), utf8("Molette"), utf8("V\xc3\xa9locit\xc3\xa9"), utf8("Aftertouch"), utf8("Automation") };
   for (size_t i = 0; i < kCvs.size(); ++i) {
-    cvSources_[i].addItemList(sources, 1);
-    addAndMakeVisible(cvSources_[i]);
-    cvSourceAttachments_[i] = std::make_unique<ComboAttachment>(processor_.apvts, cvSourceId(kCvs[i]), cvSources_[i]);
-    cvValues_[i].setSliderStyle(juce::Slider::LinearHorizontal);
-    cvValues_[i].setTextBoxStyle(juce::Slider::TextBoxRight, false, 64, 20);
-    addAndMakeVisible(cvValues_[i]);
-    cvValueAttachments_[i] = std::make_unique<SliderAttachment>(processor_.apvts, cvValueId(kCvs[i]), cvValues_[i]);
+    cvRows_[i] = std::make_unique<CvMatrixRow>(processor_, i);
+    addAndMakeVisible(*cvRows_[i]);
   }
 
   setSize(kPanelWidth + kSideWidth, kPanelHeight);
@@ -143,17 +244,14 @@ void LmentsAudioProcessorEditor::resized() {
     const auto c = panelPoint(place.x, place.y);
     knobs_[i].setBounds(juce::Rectangle<float>(c.x - 0.5f * d, c.y - 0.5f * d, d, d).toNearestInt());
   }
-  const int left = kPanelWidth + 16, width = kSideWidth - 32;
-  loadButton_.setBounds(left, 64, width - 96, 26);
-  recentButton_.setBounds(left + width - 90, 64, 90, 26);
-  resetButton_.setBounds(left, 116, 150, 24);
-  gateSource_.setBounds(left + 110, 292, width - 110, 22);
-  bendRange_.setBounds(left + 110, 316, width - 110, 22);
-  for (size_t i = 0; i < kCvs.size(); ++i) {
-    const int y = 362 + 27 * static_cast<int>(i);
-    cvSources_[i].setBounds(left + 110, y, 104, 22);
-    cvValues_[i].setBounds(left + 218, y, width - 218, 22);
-  }
+  const int left = kPanelWidth + kSideMargin, width = kSideWidth - 2 * kSideMargin;
+  loadButton_.setBounds(left, 10, 150, 26);
+  recentButton_.setBounds(left + 156, 10, 86, 26);
+  resetButton_.setBounds(left + width - 130, 10, 130, 26);
+  gateSource_.setBounds(left + 44, 134, 120, 22);
+  bendRange_.setBounds(left + 260, 134, 220, 22);
+  for (size_t i = 0; i < kCvs.size(); ++i)
+    cvRows_[i]->setBounds(left, kRowsTop + kRowHeight * static_cast<int>(i), width, kRowHeight);
 }
 
 // --- Dessin --------------------------------------------------------------------------------
@@ -274,35 +372,18 @@ void LmentsAudioProcessorEditor::paintPanel(juce::Graphics& g) {
 }
 
 void LmentsAudioProcessorEditor::paintSide(juce::Graphics& g) {
-  const int left = kPanelWidth + 16, width = kSideWidth - 32;
+  const int left = kPanelWidth + kSideMargin, width = kSideWidth - 2 * kSideMargin;
   g.setColour(kSideColour);
   g.fillRect(kPanelWidth, 0, kSideWidth, kPanelHeight);
 
-  auto title = [&](const juce::String& text, int y) {
-    g.setColour(kSideText);
-    g.setFont(juce::FontOptions(14.0f, juce::Font::bold));
-    g.drawText(text, left, y, width, 20, juce::Justification::centredLeft, false);
-    g.setColour(kSideDim.withAlpha(0.5f));
-    g.fillRect(left, y + 22, width, 1);
-  };
-  auto row = [&](const juce::String& text, int y) {
-    g.setColour(kSideText);
-    g.setFont(juce::FontOptions(12.5f));
-    g.drawText(text, left, y, 108, 22, juce::Justification::centredLeft, false);
-  };
-
-  title("Firmware", 12);
-  g.setFont(juce::FontOptions(12.5f));
+  // Firmware chargé, entre les boutons « Récents » et « Réglages d'usine ».
+  const int nameX = left + 250, nameWidth = width - 250 - 138;
+  g.setFont(juce::FontOptions(12.5f, juce::Font::bold));
   g.setColour(processor_.hasFirmware() ? kSideText : kSideDim);
-  g.drawText(processor_.hasFirmware() ? processor_.firmwareName() : utf8("aucun"), left, 40, width, 20, juce::Justification::centredLeft, true);
-  if (processor_.hasFirmware()) {
-    g.setColour(kSideDim);
-    g.setFont(juce::FontOptions(11.0f));
-    g.drawText(utf8("empreinte ") + processor_.firmwareId() + utf8(" \xc2\xb7 ") +
-                   (processor_.memoryRestored() ? utf8("r\xc3\xa9glages repris du projet") : utf8("module neuf")),
-               left, 94, width, 18, juce::Justification::centredLeft, true);
-  }
-  // Message : erreur de chargement, ou problème du firmware en marche.
+  g.drawText(processor_.hasFirmware() ? processor_.firmwareName() : utf8("aucun firmware"), nameX, 10, nameWidth, 26,
+             juce::Justification::centredLeft, true);
+
+  // Ligne d'information : un problème en rouge, sinon l'empreinte du firmware.
   juce::String warning = message_;
   if (warning.isEmpty() && processor_.hasFirmware()) {
     if (processor_.problem() == LmentsAudioProcessor::Problem::kCrashed)
@@ -310,55 +391,80 @@ void LmentsAudioProcessorEditor::paintSide(juce::Graphics& g) {
     else if (processor_.problem() == LmentsAudioProcessor::Problem::kNoSound)
       warning = utf8("Ce firmware n'a pas d\xc3\xa9marr\xc3\xa9 le son : ce n'est peut-\xc3\xaatre pas un firmware Elements.");
   }
+  g.setFont(juce::FontOptions(11.0f));
   if (warning.isNotEmpty()) {
     g.setColour(juce::Colour(0xffff8a7a));
-    g.setFont(juce::FontOptions(11.5f));
-    g.drawFittedText(warning, left, 146, width, 30, juce::Justification::topLeft, 2);
+    g.drawText(warning, left, 40, width, 16, juce::Justification::centredLeft, true);
+  } else if (processor_.hasFirmware()) {
+    g.setColour(kSideDim);
+    g.drawText(utf8("empreinte ") + processor_.firmwareId() + utf8(" \xc2\xb7 ") +
+                   (processor_.memoryRestored() ? utf8("r\xc3\xa9glages repris du projet") : utf8("module neuf")),
+               left, 40, width, 16, juce::Justification::centredLeft, true);
   }
 
-  title("Charge", 180);
-  auto gauge = [&](const juce::String& text, float value, float peak, int y, const juce::String& suffix) {
-    row(text, y);
-    const juce::Rectangle<int> bar(left + 110, y + 6, width - 110 - 52, 10);
-    g.setColour(juce::Colour(0xff3a3b41));
-    g.fillRoundedRectangle(bar.toFloat(), 3.0f);
-    const float clipped = juce::jlimit(0.0f, 1.0f, value);
+  // Jauges, côte à côte : moyenne en barre, pointe en trait.
+  auto gauge = [&](const juce::String& text, float value, float peak, int x, int w) {
+    g.setColour(kSideText);
+    g.setFont(juce::FontOptions(11.5f));
+    g.drawText(text, x, 60, 104, 18, juce::Justification::centredLeft, false);
+    const juce::Rectangle<float> bar(static_cast<float>(x + 106), 66.0f, static_cast<float>(w - 106 - 42), 7.0f);
+    g.setColour(kTrack);
+    g.fillRoundedRectangle(bar, 3.0f);
     const float worst = std::max(value, peak);
     g.setColour(worst > 0.999f ? juce::Colour(0xffff5a4a) : (worst > 0.9f ? juce::Colour(0xffffb23c) : juce::Colour(0xff5fd08a)));
-    g.fillRoundedRectangle(bar.toFloat().withWidth(static_cast<float>(bar.getWidth()) * clipped), 3.0f);
-    if (peak > 0.0f) {   // pointe : un trait
-      const float x = static_cast<float>(bar.getX()) + static_cast<float>(bar.getWidth()) * juce::jlimit(0.0f, 1.0f, peak);
-      g.fillRect(juce::Rectangle<float>(x - 1.0f, static_cast<float>(bar.getY()) - 2.0f, 2.0f, static_cast<float>(bar.getHeight()) + 4.0f));
+    g.fillRoundedRectangle(bar.withWidth(bar.getWidth() * juce::jlimit(0.0f, 1.0f, value)), 3.0f);
+    if (peak > 0.0f) {
+      g.setColour(juce::Colour(0xfff0f0f2));
+      g.fillRect(bar.getX() + bar.getWidth() * juce::jlimit(0.0f, 1.0f, peak) - 1.0f, bar.getY() - 2.0f, 2.0f, bar.getHeight() + 4.0f);
     }
     g.setColour(kSideText);
-    g.drawText(suffix, bar.getRight() + 6, y, 46, 22, juce::Justification::centredRight, false);
+    g.drawText(juce::String(juce::roundToInt(value * 100.0f)) + " %", x + w - 40, 60, 40, 18, juce::Justification::centredRight, false);
   };
   const float moduleLoad = processor_.moduleLoad(), modulePeak = processor_.moduleLoadPeak(), hostLoad = processor_.hostLoad();
-  gauge(utf8("Puce du module"), moduleLoad, modulePeak, 204, juce::String(juce::roundToInt(moduleLoad * 100.0f)) + " %");
 #if JUCE_MAC
   const char* const hostName = "Ce Mac (1 c\xc5\x93ur)";
 #else
   const char* const hostName = "Ce PC (1 c\xc5\x93ur)";
 #endif
-  gauge(utf8(hostName), hostLoad, 0.0f, 228, juce::String(juce::roundToInt(hostLoad * 100.0f)) + " %");
+  const int half = (width - 16) / 2;
+  gauge(utf8("Puce du module"), moduleLoad, modulePeak, left, half);
+  gauge(utf8(hostName), hostLoad, 0.0f, left + half + 16, half);
   g.setFont(juce::FontOptions(11.0f));
   if (processor_.moduleOverloaded()) {
     g.setColour(juce::Colour(0xffff5a4a));
     g.drawText(utf8("Surcharge : le module craque (") + juce::String(processor_.moduleOverruns()) + utf8(" blocs manqu\xc3\xa9s)"),
-               left, 250, width, 14, juce::Justification::centredLeft, true);
+               left, 80, width, 16, juce::Justification::centredLeft, true);
   } else if (processor_.hasFirmware()) {
     g.setColour(kSideDim);
     g.drawText(utf8("pointe ") + juce::String(juce::roundToInt(modulePeak * 100.0f)) + utf8(" % (estimation, voir README)"),
-               left, 250, width, 14, juce::Justification::centredLeft, true);
+               left, 80, width, 16, juce::Justification::centredLeft, true);
   }
 
-  title(utf8("Interface MIDI \xe2\x86\x92 CV"), 264);
-  row("GATE", 292);
-  row("Pitch bend", 316);
+  // Interface MIDI -> CV.
+  g.setColour(kSideText);
+  g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+  g.drawText(utf8("Interface MIDI \xe2\x86\x92 CV"), left, 104, width, 20, juce::Justification::centredLeft, false);
   g.setColour(kSideDim);
   g.setFont(juce::FontOptions(11.0f));
-  g.drawText(utf8("V/OCT : notes MIDI (0 V = note 36)"), left, 340, width, 18, juce::Justification::centredLeft, false);
-  for (size_t i = 0; i < kCvs.size(); ++i) row(kCvs[i].label, 362 + 27 * static_cast<int>(i));
+  g.drawText(utf8("V/OCT : notes MIDI (0 V = note 36)"), left, 104, width, 20, juce::Justification::centredRight, false);
+  g.setColour(juce::Colour(0xff4a4b52));
+  g.fillRect(left, 126, width, 1);
+  g.setColour(kSideText);
+  g.setFont(juce::FontOptions(11.5f));
+  g.drawText("GATE", left, 134, 40, 22, juce::Justification::centredLeft, false);
+  g.drawText("Pitch bend", left + 180, 134, 76, 22, juce::Justification::centredLeft, false);
+
+  // En-tête de la matrice.
+  g.setColour(kSideDim);
+  g.setFont(juce::FontOptions(10.5f));
+  g.drawText("prise", left + 12, kRowsTop - 18, 80, 16, juce::Justification::centredLeft, false);
+  for (int j = 0; j < CvMatrixRow::kNumSources; ++j)
+    g.drawText(utf8(kSourceNames[j]), left + CvMatrixRow::kNameWidth + j * CvMatrixRow::kColumnWidth, kRowsTop - 18,
+               CvMatrixRow::kColumnWidth, 16, juce::Justification::centred, false);
+  g.drawText("tension", left + CvMatrixRow::kNameWidth + CvMatrixRow::kNumSources * CvMatrixRow::kColumnWidth + 8, kRowsTop - 18,
+             80, 16, juce::Justification::centredLeft, false);
+  g.setColour(kRule);
+  g.fillRect(left, kRowsTop + kRowHeight * static_cast<int>(kCvs.size()), width, 1);
 }
 
 void LmentsAudioProcessorEditor::paint(juce::Graphics& g) {
@@ -370,7 +476,7 @@ void LmentsAudioProcessorEditor::paint(juce::Graphics& g) {
 
 void LmentsAudioProcessorEditor::timerCallback() {
   // « Automation » : la tension vient du curseur ; sinon le curseur ne sert pas.
-  for (size_t i = 0; i < kCvs.size(); ++i) cvValues_[i].setEnabled(cvSources_[i].getSelectedId() == 5);
+  for (auto& row : cvRows_) row->refresh();
   resetButton_.setEnabled(processor_.hasFirmware());
   repaint();
 }

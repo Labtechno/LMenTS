@@ -16,6 +16,8 @@ Projet indépendant, sans lien avec le fabricant du module.
 | 3 | Chargement des firmwares, mémoire séparée par firmware, sauvée dans le projet | fait |
 | 4 | Temps d'accès mémoire, jauge d'occupation du processeur, craquements en cas de surcharge | fait |
 | 5 | Optimisation, installateur Mac définitif, version Windows et son installateur | fait |
+| 6 | Interface définitive (maquette D : façade + matrice MIDI → CV) | fait |
+| 7 | Dossier « EFFET SUR POTENTIOMETRE » (mesures avec l'émulateur) | à faire |
 
 ## Installer la version d'essai
 
@@ -52,6 +54,12 @@ Aucun firmware n'est fourni avec le plugin.
 
 ## Le plugin dans Reason
 
+![Interface de LMenTS](docs/interface.png)
+
+*Image faite par le programme d'essai (`LMENTS_SNAPSHOT=interface.png
+plugin_test <firmware>`), avec le firmware recompilé, une note tenue, la molette
+et deux prises en mode Automation.*
+
 - **Façade** : les 27 potards du module, le bouton PLAY et ses trois voyants. Tous
   les potards et le bouton PLAY sont des paramètres automatisables.
 - **Sorties** : OUT L et OUT R, en stéréo. Avec SPACE au minimum, comme sur le
@@ -59,10 +67,15 @@ Aucun firmware n'est fourni avec le plugin.
 - **Entrées audio** : l'entrée 1 du plugin est l'EXT IN rouge (côté BLOW),
   l'entrée 2 l'EXT IN turquoise (côté STRIKE). Dans Reason, elles sont à l'arrière
   du boîtier du plugin (touche Tab).
-- **Interface MIDI → CV** (panneau de droite) : les notes jouent sur V/OCT
-  (0 V = note 36) et sur GATE. Chacune des 12 autres prises CV peut recevoir
-  la molette, la vélocité, l'aftertouch ou une valeur d'automation ; chaque prise a
-  un paramètre automatisable, donc pilotable par le CV Programmer de Reason.
+- **Panneau de droite** : en haut, le firmware (Charger un firmware…, Récents ▾,
+  Réglages d'usine…), son empreinte et les jauges ; en dessous, l'**Interface
+  MIDI → CV**.
+- **Interface MIDI → CV** : les notes jouent sur V/OCT (0 V = note 36) et sur
+  GATE. Les 12 autres prises CV forment une matrice : une ligne par prise, une
+  colonne par source (Rien, Molette, Vélocité, Aftertouch, Automation). Un clic
+  sur un point branche la source. La dernière colonne montre la tension reçue,
+  en direct ; en mode Automation, c'est un curseur. Chaque prise a un paramètre
+  automatisable, donc pilotable par le CV Programmer de Reason.
 - **Accord** : avec COARSE à sa position par défaut, la note jouée au clavier est
   la note entendue (vérifié : la 3 = 220,0 Hz).
 - **Jauges** : occupation de la puce du module (moyenne en barre, pointe en
@@ -239,6 +252,17 @@ qu'un M1 cœur pour cœur, mais ce n'est **pas mesuré**.
   idéale : les valeurs viennent des réglages d'usine du firmware, pas des schémas.
 - **Les installateurs ne sont pas signés** (ni par Apple, ni pour Windows) : il
   faut passer une fois par « Ouvrir quand même » ou « Exécuter quand même ».
+
+## Ce qui est vérifié à l'étape 6
+
+| Essai | Résultat |
+|---|---|
+| Interface dessinée par le programme d'essai (image ci-dessus) | la façade, le panneau du firmware, les jauges et la matrice s'affichent sans chevauchement |
+| Matrice : sources branchées par les paramètres du plugin | le bon point s'allume, la tension reçue s'affiche en direct |
+| Essais du plugin (étapes 2 à 5) | inchangés, sur Mac et Windows |
+
+Non vérifié : le clic sur les points de la matrice et le curseur Automation
+n'ont été essayés qu'à la lecture du code, pas à la souris, ni dans Reason.
 
 ## Refaire les tests
 

@@ -6,7 +6,7 @@ if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
   set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Architectures macOS" FORCE)
 endif()
 
-project(LMenTS VERSION 0.5.0 LANGUAGES C CXX)
+project(LMenTS VERSION 0.6.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -103,7 +103,7 @@ if(LMENTS_BUILD_PLUGIN)
       Source/PluginProcessor.cpp
       Source/PluginEditor.cpp)
     target_include_directories(lments_plugin_test PRIVATE Source Source/hw Source/engine)
-    target_compile_definitions(lments_plugin_test PRIVATE JucePlugin_Name="LMenTS" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_compile_definitions(lments_plugin_test PRIVATE JucePlugin_Name="LMenTS" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(lments_plugin_test PRIVATE lments_emu juce::juce_audio_utils
       juce::juce_recommended_config_flags)
   endif()

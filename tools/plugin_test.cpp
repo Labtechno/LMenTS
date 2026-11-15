@@ -404,6 +404,35 @@ int main(int argc, char** argv) {
     }
   }
 
+  // Image de l'interface (pour la documentation et pour vérifier la mise en page) :
+  //   LMENTS_SNAPSHOT=interface.png plugin_test firmware.wav
+  if (const char* snapshot = std::getenv("LMENTS_SNAPSHOT")) {
+    LmentsAudioProcessor s;
+    s.setPlayConfigDetails(2, 2, kRate, kBlock);
+    s.prepareToPlay(kRate, kBlock);
+    s.loadFirmwareFile(firmwareA);
+    setParam(s, "cv_strength_source", 2.0f);      // vélocité
+    setParam(s, "cv_flow_source", 1.0f);          // molette
+    setParam(s, "cv_damping_source", 4.0f);       // automation
+    setParam(s, "cv_damping", 3.1f);
+    setParam(s, "cv_brightness_source", 4.0f);
+    setParam(s, "cv_brightness", -1.75f);
+    render(s, 1.0);
+    juce::MidiBuffer midi;
+    midi.addEvent(juce::MidiMessage::controllerEvent(1, 1, 80), 0);
+    midi.addEvent(juce::MidiMessage::noteOn(1, 48, static_cast<juce::uint8>(110)), 0);
+    render(s, 0.6, &midi);
+    std::unique_ptr<juce::AudioProcessorEditor> editor(s.createEditor());
+    editor->setVisible(true);
+    juce::MessageManager::getInstance()->runDispatchLoopUntil(300);   // l'interface lit les tensions
+    const auto image = editor->createComponentSnapshot(editor->getLocalBounds(), true, 2.0f);
+    juce::File out = juce::File::getCurrentWorkingDirectory().getChildFile(snapshot);
+    out.deleteFile();
+    juce::FileOutputStream stream(out);
+    juce::PNGImageFormat png;
+    expect(stream.openedOk() && png.writeImageToStream(image, stream), "image de l'interface enregistree");
+  }
+
   std::printf(failures ? "DES ECHECS\n" : "OK\n");
   return failures ? 1 : 0;
 }
