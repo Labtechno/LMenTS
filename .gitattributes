@@ -1,0 +1,6 @@
+# Les résultats de référence des tests sont comparés octet par octet : Git ne doit
+# pas changer leurs fins de ligne (Windows).
+*.ref -text
+*.bin binary
+*.wav binary
+*.sh text eol=lf
