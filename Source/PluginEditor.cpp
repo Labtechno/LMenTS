@@ -335,7 +335,12 @@ void LmentsAudioProcessorEditor::paintSide(juce::Graphics& g) {
   };
   const float moduleLoad = processor_.moduleLoad(), modulePeak = processor_.moduleLoadPeak(), hostLoad = processor_.hostLoad();
   gauge(utf8("Puce du module"), moduleLoad, modulePeak, 204, juce::String(juce::roundToInt(moduleLoad * 100.0f)) + " %");
-  gauge(utf8("Ce Mac (1 c\xc5\x93ur)"), hostLoad, 0.0f, 228, juce::String(juce::roundToInt(hostLoad * 100.0f)) + " %");
+#if JUCE_MAC
+  const char* const hostName = "Ce Mac (1 c\xc5\x93ur)";
+#else
+  const char* const hostName = "Ce PC (1 c\xc5\x93ur)";
+#endif
+  gauge(utf8(hostName), hostLoad, 0.0f, 228, juce::String(juce::roundToInt(hostLoad * 100.0f)) + " %");
   g.setFont(juce::FontOptions(11.0f));
   if (processor_.moduleOverloaded()) {
     g.setColour(juce::Colour(0xffff5a4a));

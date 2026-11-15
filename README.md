@@ -201,6 +201,45 @@ et elles montrent pourquoi émuler la puce vaut mieux que recompiler le code :
 | Firmware à 64 modes | blocs manqués, sauts dans le son, alerte « Surcharge » dans le plugin |
 | Démarrage, accord, mémoire par firmware (étapes 2 et 3) | inchangés |
 
+## Ce qui est vérifié à l'étape 5
+
+| Essai | Résultat |
+|---|---|
+| Chemin rapide de l'émulateur (`machine_test fastpath`), firmware officiel recompilé et firmware à 64 modes | même son, échantillon par échantillon (204 800 sur 204 800), mêmes cycles, donc même jauge et même surcharge |
+| Processeur après l'optimisation (`armtests`) | toujours identique à QEMU et à l'ordinateur, bit pour bit |
+| Mac Apple Silicon et Mac Intel (Rosetta) : processeur (`run_prebuilt.sh`) | identique aux références |
+| Windows : processeur (`run_prebuilt.sh`) | identique aux références |
+| Windows : plugin (`plugin_test`, les mêmes essais que sur Mac) | tout marche : accord, stéréo, PLAY, EXT IN, CV, projet, mémoire par firmware, 44,1 / 96 kHz, surcharge signalée |
+| Windows : installation, mise à jour (l'ancienne version est retirée), désinstallation (un fichier de l'utilisateur reste) | marche, essayé sur le PC de GitHub |
+| Mac : installation, mise à jour, désinstallation | marche, essayé sur le Mac de GitHub |
+
+**Vitesse** (part d'un cœur pour faire tourner le module en temps réel, plugin
+au complet, mesurée sur les machines de GitHub) :
+
+| Machine | Étape 4 | Étape 5 |
+|---|---|---|
+| Mac M1 (machine virtuelle de GitHub) | 114 à 134 % | 92 à 111 % |
+| PC Windows de GitHub (machine virtuelle) | — | 62 à 102 % |
+
+Au-dessus de 100 %, le son ne suivrait pas sur cette machine. Les chiffres
+changent d'un essai à l'autre, car GitHub ne donne pas toujours la même machine,
+et ces machines virtuelles sont lentes. Un M4 Max est nettement plus rapide
+qu'un M1 cœur pour cœur, mais ce n'est **pas mesuré**.
+
+### Ce qui n'est pas encore vérifié
+
+- **Rien n'a été essayé dans Reason**, ni sur ton Mac, ni sur un PC Windows : les
+  essais tournent sur GitHub, sans logiciel hôte.
+- **La vitesse sur ton M4 Max** n'est pas mesurée (la jauge « Ce Mac » du plugin
+  te la donnera ; sous Windows, elle s'appelle « Ce PC »).
+- **Rien n'a été comparé à un vrai module.**
+- **La jauge de la puce du module** est une estimation recalée sur un seul
+  repère (voir « La charge de la puce »), pas une mesure.
+- **L'électronique analogique** (étages d'entrée, convertisseur audio, sortie) est
+  idéale : les valeurs viennent des réglages d'usine du firmware, pas des schémas.
+- **Les installateurs ne sont pas signés** (ni par Apple, ni pour Windows) : il
+  faut passer une fois par « Ouvrir quand même » ou « Exécuter quand même ».
+
 ## Refaire les tests
 
 Sur Linux, avec `gcc-arm-none-eabi`, `libnewlib-arm-none-eabi`,
