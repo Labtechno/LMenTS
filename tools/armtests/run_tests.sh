@@ -18,7 +18,7 @@ LDFLAGS="-nostartfiles -T link.ld -Wl,--gc-sections --specs=nosys.specs -Wl,--de
 fail=0
 
 EMU="../../Source/emu"
-${CXX:-g++} -std=c++17 -O2 -ffp-contract=off -o "$OUT/emu_run" ../emu_run.cpp $EMU/CortexM4.cpp $EMU/CortexM4Fpu.cpp || exit 1
+${CXX:-g++} -std=c++17 -O2 -ffp-contract=off -o "$OUT/emu_run" ../emu_run.cpp $EMU/CortexM4.cpp || exit 1
 (cd "$OUT" && python3 "$OLDPWD/gen_flags.py" > gen.log && python3 "$OLDPWD/gen_fp.py" > genfp.log) || exit 1
 
 check() {  # nom, fichier de référence, fichier obtenu

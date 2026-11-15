@@ -9,16 +9,16 @@
 //     que le drapeau « inexact » soit déjà levé (il ne peut alors plus changer) ;
 //   - exact : tous les autres cas passent par SoftFloat.h, qui suit pas à pas le
 //     manuel ARM (arrondis, drapeaux, NaN, flush-to-zero...).
-// Le chemin rapide ne dépend d'aucun réglage flottant de l'ordinateur : si
-// celui-ci écrase les très petits nombres (réglage courant dans les logiciels
-// audio), le résultat sort des cas « ordinaires » et repasse par le chemin exact.
+// Quand en plus le drapeau « soupassement » est déjà levé (et sans flush-to-zero),
+// les très petits nombres (dénormalisés) passent aussi par le chemin rapide : il
+// suffit que les opérandes et le résultat soient finis. C'est le cas pendant
+// l'extinction des notes, quand les filtres du résonateur retombent vers zéro.
+// Pendant l'exécution, CortexM4::run() met le calcul flottant de l'ordinateur en
+// mode standard (certains logiciels audio lui font écraser les très petits nombres).
 
-#include "CortexM4.h"
-#include "SoftFloat.h"
-
-#include <cmath>
-
-#pragma STDC FP_CONTRACT OFF
+// Ce fichier est inclus à la fin de CortexM4.cpp : tout le processeur est compilé
+// d'un seul bloc, pour que les instructions flottantes (les trois quarts de ce
+// qu'exécute Elements) soient décodées sans appel de fonction.
 
 namespace lments {
 namespace emu {
@@ -32,6 +32,7 @@ inline uint32_t asBits(float f) { uint32_t bits; std::memcpy(&bits, &f, 4); retu
 inline bool isNormal(uint32_t a) { return ((a & 0x7f800000u) - 0x00800000u) < 0x7f000000u; }
 inline bool isZero(uint32_t a) { return (a << 1) == 0; }
 inline bool isPlain(uint32_t a) { return isNormal(a) || isZero(a); }
+inline bool isFinite(uint32_t a) { return (~a & 0x7f800000u) != 0; }
 // Résultat sûr d'une multiplication ou d'une division : normal, mais pas le plus
 // petit nombre normal. Celui-ci peut venir de l'arrondi d'une valeur plus petite,
 // que la puce signale comme un soupassement (et écrase en mode flush-to-zero).
@@ -42,7 +43,10 @@ constexpr uint32_t kSign = 0x80000000u;
 }  // namespace
 
 // Vérifications avant toute instruction flottante (ExecuteFPCheck du manuel ARM).
-bool CortexM4::fpCheck() {
+// Une fois passées, elles restent valables jusqu'au prochain événement qui peut
+// les remettre en cause (interruption, écriture d'un registre de contrôle) :
+// fpReady_ évite alors de les refaire à chaque instruction.
+LMENTS_NOINLINE bool CortexM4::fpCheck() {
   const uint32_t access = (cpacr_ >> 20) & 3;
   if (access == 0 || access == 2 || (access == 1 && controlNpriv_ && ipsr_ == 0)) {
     cfsr_ |= 1u << 19;
@@ -54,65 +58,80 @@ bool CortexM4::fpCheck() {
     setFpscr((fpscr_ & ~0x07c00000u) | (fpdscr_ & 0x07c00000u));
     controlFpca_ = true;
   }
-  ++changes_;   // une boucle d'attente ne calcule pas en flottant
+  fpReady_ = true;
   return true;
 }
 
 // Sauvegarde paresseuse : écrit maintenant les registres dans la place réservée
 // sur la pile à l'entrée de l'interruption.
-void CortexM4::preserveFpState() {
+LMENTS_NOINLINE void CortexM4::preserveFpState() {
   for (uint32_t i = 0; i < 16; ++i) write32(fpcar_ + 4 * i, s_[i]);
   write32(fpcar_ + 0x40, fpscr_);
   fpccr_ &= ~1u;
   cycles_ += 17;
 }
 
+// Chemin exact, hors de la boucle rapide.
+LMENTS_NOINLINE uint32_t CortexM4::fpSlow(int op, uint32_t a, uint32_t b, uint32_t c) {
+  uint32_t env = fpscr_, r;
+  switch (op) {
+    case kSlowAdd: r = sf::add(a, b, env); break;
+    case kSlowSub: r = sf::add(a, b, env, true); break;
+    case kSlowMul: r = sf::mul(a, b, env); break;
+    case kSlowDiv: r = sf::div(a, b, env); break;
+    case kSlowSqrt: r = sf::sqrt(a, env); break;
+    default: r = sf::mulAdd(c, a, b, env); break;
+  }
+  if (env != fpscr_) setFpscr(env);
+  return r;
+}
+
 uint32_t CortexM4::fpAdd(uint32_t a, uint32_t b) {
-  if (fpFast_ && isPlain(a) && isPlain(b)) {
+  if (fpAnyFinite_ && isFinite(a) && isFinite(b)) {
+    const uint32_t r = asBits(asFloat(a) + asFloat(b));
+    if (isFinite(r)) return r;
+  } else if (fpFast_ && isPlain(a) && isPlain(b)) {
     const uint32_t r = asBits(asFloat(a) + asFloat(b));
     if (isNormal(r)) return r;
     if (isZero(r) && ((a ^ b) == kSign || (isZero(a) && isZero(b)))) return r;
   }
-  uint32_t env = fpscr_;
-  const uint32_t r = sf::add(a, b, env);
-  if (env != fpscr_) setFpscr(env);
-  return r;
+  return fpSlow(kSlowAdd, a, b, 0);
 }
 
 uint32_t CortexM4::fpSub(uint32_t a, uint32_t b) {
-  if (fpFast_ && isPlain(a) && isPlain(b)) {
+  if (fpAnyFinite_ && isFinite(a) && isFinite(b)) {
+    const uint32_t r = asBits(asFloat(a) - asFloat(b));
+    if (isFinite(r)) return r;
+  } else if (fpFast_ && isPlain(a) && isPlain(b)) {
     const uint32_t r = asBits(asFloat(a) - asFloat(b));
     if (isNormal(r)) return r;
     if (isZero(r) && (a == b || (isZero(a) && isZero(b)))) return r;
   }
-  uint32_t env = fpscr_;
-  const uint32_t r = sf::add(a, b, env, true);
-  if (env != fpscr_) setFpscr(env);
-  return r;
+  return fpSlow(kSlowSub, a, b, 0);
 }
 
 uint32_t CortexM4::fpMul(uint32_t a, uint32_t b) {
-  if (fpFast_ && isPlain(a) && isPlain(b)) {
+  if (fpAnyFinite_ && isFinite(a) && isFinite(b)) {
+    const uint32_t r = asBits(asFloat(a) * asFloat(b));
+    if (isFinite(r)) return r;
+  } else if (fpFast_ && isPlain(a) && isPlain(b)) {
     const uint32_t r = asBits(asFloat(a) * asFloat(b));
     if (isSafeProduct(r)) return r;
     if (isZero(r) && (isZero(a) || isZero(b))) return r;
   }
-  uint32_t env = fpscr_;
-  const uint32_t r = sf::mul(a, b, env);
-  if (env != fpscr_) setFpscr(env);
-  return r;
+  return fpSlow(kSlowMul, a, b, 0);
 }
 
 uint32_t CortexM4::fpDiv(uint32_t a, uint32_t b) {
-  if (fpFast_ && isPlain(a) && isNormal(b)) {
+  if (fpAnyFinite_ && isFinite(a) && isFinite(b) && !isZero(b)) {
+    const uint32_t r = asBits(asFloat(a) / asFloat(b));
+    if (isFinite(r)) return r;
+  } else if (fpFast_ && isPlain(a) && isNormal(b)) {
     const uint32_t r = asBits(asFloat(a) / asFloat(b));
     if (isSafeProduct(r)) return r;
     if (isZero(a)) return (a ^ b) & kSign;
   }
-  uint32_t env = fpscr_;
-  const uint32_t r = sf::div(a, b, env);
-  if (env != fpscr_) setFpscr(env);
-  return r;
+  return fpSlow(kSlowDiv, a, b, 0);
 }
 
 uint32_t CortexM4::fpSqrt(uint32_t a) {
@@ -120,15 +139,13 @@ uint32_t CortexM4::fpSqrt(uint32_t a) {
     if (isNormal(a) && !(a & kSign)) return asBits(std::sqrt(asFloat(a)));
     if (isZero(a)) return a;
   }
-  uint32_t env = fpscr_;
-  const uint32_t r = sf::sqrt(a, env);
-  if (env != fpscr_) setFpscr(env);
-  return r;
+  return fpSlow(kSlowSqrt, a, 0, 0);
 }
 
 // addend + a * b avec un seul arrondi.
 uint32_t CortexM4::fpMulAdd(uint32_t addend, uint32_t a, uint32_t b) {
-  if (fpFast_ && isPlain(addend) && isPlain(a) && isPlain(b)) {
+  const bool anyFinite = fpAnyFinite_ && isFinite(addend) && isFinite(a) && isFinite(b);
+  if (anyFinite || (fpFast_ && isPlain(addend) && isPlain(a) && isPlain(b))) {
 #if defined(__aarch64__) || defined(__FMA__)
     const uint32_t r = asBits(__builtin_fmaf(asFloat(a), asFloat(b), asFloat(addend)));
 #else
@@ -150,16 +167,16 @@ uint32_t CortexM4::fpMulAdd(uint32_t addend, uint32_t a, uint32_t b) {
     }
     const uint32_t r = asBits(static_cast<float>(s));
 #endif
-    if (isSafeProduct(r)) return r;
+    if (anyFinite ? isFinite(r) : isSafeProduct(r)) return r;
+    // Zéro exact : produit nul plus zéro. L'ordinateur donne le bon signe.
+    if (isZero(r) && isZero(addend) && (isZero(a) || isZero(b))) return r;
   }
-  uint32_t env = fpscr_;
-  const uint32_t r = sf::mulAdd(addend, a, b, env);
-  if (env != fpscr_) setFpscr(env);
-  return r;
+  return fpSlow(kSlowMulAdd, a, b, addend);
 }
 
 // Opérations de calcul (VADD, VMUL, VCVT...), simple précision uniquement.
 void CortexM4::execFpData(uint32_t insn) {
+  ++changes_;   // une boucle d'attente ne calcule pas en flottant
   const uint32_t hw1 = insn >> 16, hw2 = insn & 0xffff;
   if (hw2 & 0x100) { undefined(insn); return; }   // double précision : absente de cette puce
   const uint32_t d = ((hw2 >> 12) << 1) | ((hw1 >> 6) & 1);
@@ -300,11 +317,12 @@ void CortexM4::execCoprocessor(uint32_t insn) {
     raiseFault("coprocesseur absent");
     return;
   }
-  if (!fpCheck()) return;
+  if (!fpReady_ && !fpCheck()) return;
   const bool dbl = hw2 & 0x100;
 
   if ((hw1 & 0x0f00) == 0x0e00) {
     if (!(hw2 & 0x10)) { execFpData(insn); return; }
+    ++changes_;
     // Transferts 32 bits avec un registre ordinaire.
     const uint32_t rt = hw2 >> 12;
     const bool toCore = hw1 & 0x10;
@@ -337,6 +355,7 @@ void CortexM4::execCoprocessor(uint32_t insn) {
     return;
   }
 
+  ++changes_;
   const bool p = hw1 & 0x100, u = hw1 & 0x80, dBit = hw1 & 0x40, w = hw1 & 0x20, load = hw1 & 0x10;
   const uint32_t rn = hw1 & 15, vd = hw2 >> 12, imm8 = hw2 & 0xff;
 

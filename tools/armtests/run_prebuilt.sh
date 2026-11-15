@@ -12,7 +12,7 @@ OUT=${OUT:-/tmp/lments-prebuilt}
 mkdir -p "$OUT"
 CXX=("${@:-c++}")
 EMU="../../Source/emu"
-"${CXX[@]}" -std=c++17 -O2 -ffp-contract=off -o "$OUT/emu_run" ../emu_run.cpp $EMU/CortexM4.cpp $EMU/CortexM4Fpu.cpp || exit 1
+"${CXX[@]}" -std=c++17 -O2 -ffp-contract=off -o "$OUT/emu_run" ../emu_run.cpp $EMU/CortexM4.cpp || exit 1
 fail=0
 for t in arith flags fp irq elements; do
   "$OUT/emu_run" prebuilt/$t.bin > "$OUT/$t.out" 2> "$OUT/$t.stat"

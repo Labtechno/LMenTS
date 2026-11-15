@@ -21,6 +21,12 @@
 // (accélérateur « ART ») est prévu à l'étape 4.
 
 #include "CortexM4.h"
+#include "SoftFloat.h"
+
+#include <cmath>
+#if defined(__x86_64__) || defined(__i386__)
+#include <xmmintrin.h>
+#endif
 
 #include <algorithm>
 
@@ -33,6 +39,8 @@
 #define LMENTS_FLATTEN
 #endif
 #endif
+// Ce qui est rare reste hors de ce bloc, pour qu'il tienne mieux dans le cache.
+#define LMENTS_NOINLINE __attribute__((noinline))
 
 namespace lments {
 namespace emu {
@@ -197,7 +205,7 @@ void CortexM4::write8(uint32_t a, uint32_t v) {
   slowWrite(a, v & 0xff, 1);
 }
 
-uint32_t CortexM4::slowRead(uint32_t a, int size) {
+LMENTS_NOINLINE uint32_t CortexM4::slowRead(uint32_t a, int size) {
   // Au démarrage, la flash est aussi visible à l'adresse 0.
   if (a < flashSize_ && a + size <= flashSize_) {
     uint32_t v = 0;
@@ -225,7 +233,7 @@ uint32_t CortexM4::slowRead(uint32_t a, int size) {
   return bus_ ? bus_->read(a, size) : 0;
 }
 
-void CortexM4::slowWrite(uint32_t a, uint32_t v, int size) {
+LMENTS_NOINLINE void CortexM4::slowWrite(uint32_t a, uint32_t v, int size) {
   if (a - kCcmBase < ccmSize_ && a - kCcmBase + size <= ccmSize_) {
     if (std::memcmp(&ccm_[a - kCcmBase], &v, static_cast<size_t>(size)) != 0) {
       std::memcpy(&ccm_[a - kCcmBase], &v, static_cast<size_t>(size));
@@ -407,8 +415,8 @@ void CortexM4::scsWrite(uint32_t a, uint32_t v) {
     case 0xe000ed24u: shcsr_ = v; break;
     case 0xe000ed28u: cfsr_ &= ~v; break;
     case 0xe000ed2cu: hfsr_ &= ~v; break;
-    case 0xe000ed88u: cpacr_ = v & 0x00f00000u; break;
-    case 0xe000ef34u: fpccr_ = v & 0xc000017fu; break;
+    case 0xe000ed88u: cpacr_ = v & 0x00f00000u; fpReady_ = false; break;
+    case 0xe000ef34u: fpccr_ = v & 0xc000017fu; fpReady_ = false; break;
     case 0xe000ef38u: fpcar_ = v & ~7u; break;
     case 0xe000ef3cu: fpdscr_ = v & 0x07c00000u; break;
     default: break;
@@ -448,7 +456,7 @@ void CortexM4::updateNextEvent() {
   irqDirty_ = true;   // la boucle de run() recalcule sa limite
 }
 
-void CortexM4::serviceDeadlines() {
+LMENTS_NOINLINE void CortexM4::serviceDeadlines() {
   while (cycles_ >= systickNextFire_) {
     systickCtrl_ |= 0x10000u;
     if (systickCtrl_ & 2) pendException(15);
@@ -495,7 +503,7 @@ void CortexM4::updateExecutionPriority() {
   execPriority_ = p;
 }
 
-void CortexM4::checkInterrupts() {
+LMENTS_NOINLINE void CortexM4::checkInterrupts() {
   irqDirty_ = false;
   int best = 0;
   int bestPriority = 256;
@@ -528,7 +536,7 @@ uint32_t CortexM4::xpsr() const {
          (ge_ << 16) | ((itstate_ >> 2) << 10) | ipsr_;
 }
 
-void CortexM4::exceptionEntry(int number, uint32_t returnAddress) {
+LMENTS_NOINLINE void CortexM4::exceptionEntry(int number, uint32_t returnAddress) {
   ++changes_;
   // Avec un contexte flottant actif, le cadre de pile est étendu (S0-S15, FPSCR).
   const bool fp = controlFpca_;
@@ -563,6 +571,9 @@ void CortexM4::exceptionEntry(int number, uint32_t returnAddress) {
   }
   r_[13] = sp;
 
+  ++exceptionCount_[number];
+  fpReady_ = false;
+  if (ipsr_ == 0) handlerSince_ = cycles_;
   r_[14] = 0xffffffe0u | (fp ? 0 : 0x10u) | (ipsr_ != 0 ? 0x1u : (usingPsp_ ? 0xdu : 0x9u));
   switchStack(false);
   controlFpca_ = false;
@@ -580,7 +591,7 @@ void CortexM4::exceptionEntry(int number, uint32_t returnAddress) {
   irqDirty_ = true;
 }
 
-void CortexM4::exceptionReturn(uint32_t excReturn) {
+LMENTS_NOINLINE void CortexM4::exceptionReturn(uint32_t excReturn) {
   active_[ipsr_] = false;
   switch (excReturn & 0xf) {
     case 0x1: switchStack(false); break;
@@ -610,6 +621,7 @@ void CortexM4::exceptionReturn(uint32_t excReturn) {
     }
   }
   controlFpca_ = fp;
+  fpReady_ = false;
   r_[13] = (sp + frameSize) | (forceAlign ? ((psr >> 7) & 4) : 0);
   n_ = psr >> 31; z_ = (psr >> 30) & 1; c_ = (psr >> 29) & 1; v_ = (psr >> 28) & 1;
   q_ = (psr >> 27) & 1;
@@ -619,6 +631,7 @@ void CortexM4::exceptionReturn(uint32_t excReturn) {
   updateExecutionPriority();
   irqDirty_ = true;
   cycles_ += 12;
+  if (ipsr_ == 0) handlerCycles_ += cycles_ - handlerSince_;
   prefetchFlush_ = true;
 }
 
@@ -628,14 +641,14 @@ void CortexM4::halt(const char* reason) {
   haltReason_ = reason;
 }
 
-void CortexM4::raiseFault(const char* reason) {
+LMENTS_NOINLINE void CortexM4::raiseFault(const char* reason) {
   if (haltReason_[0] == 0) { haltReason_ = reason; faultPc_ = pc_; }
   if (active_[3] || execPriority_ <= -1) { halt(reason); return; }
   hfsr_ |= 1u << 30;
   exceptionEntry(3, pc_);
 }
 
-void CortexM4::undefined(uint32_t) {
+LMENTS_NOINLINE void CortexM4::undefined(uint32_t) {
   cfsr_ |= 1u << 16;
   raiseFault("instruction non reconnue");
 }
@@ -650,6 +663,7 @@ void CortexM4::reset() {
   ge_ = 0;
   std::memset(s_, 0, sizeof(s_));
   setFpscr(0);
+  fpReady_ = false;
   controlFpca_ = false; cpacr_ = 0; fpccr_ = 0xc0000000u; fpcar_ = 0; fpdscr_ = 0;
   itstate_ = 0; ipsr_ = 0; otherSp_ = 0; usingPsp_ = false; controlNpriv_ = false;
   primask_ = faultmask_ = basepri_ = 0;
@@ -670,7 +684,34 @@ void CortexM4::reset() {
 
 // --- Exécution --------------------------------------------------------------------------
 
+namespace {
+
+// Met le calcul flottant de l'ordinateur en mode standard (arrondi au plus près,
+// très petits nombres calculés normalement) le temps d'exécuter le processeur
+// émulé, puis remet le réglage d'avant.
+#if defined(__x86_64__) || defined(__i386__)
+struct HostFloatMode {
+  unsigned saved;
+  HostFloatMode() : saved(_mm_getcsr()) { if ((saved & 0xffc0u) != 0x1f80u) _mm_setcsr(0x1f80u | (saved & 0x3fu)); }
+  ~HostFloatMode() { if ((saved & 0xffc0u) != 0x1f80u) _mm_setcsr(saved); }
+};
+#elif defined(__aarch64__)
+struct HostFloatMode {
+  uint64_t saved;
+  HostFloatMode() {
+    __asm__ volatile("mrs %0, fpcr" : "=r"(saved));
+    if (saved & 0x07c00000u) { const uint64_t standard = saved & ~uint64_t { 0x07c00000u }; __asm__ volatile("msr fpcr, %0" : : "r"(standard)); }
+  }
+  ~HostFloatMode() { if (saved & 0x07c00000u) __asm__ volatile("msr fpcr, %0" : : "r"(saved)); }
+};
+#else
+struct HostFloatMode {};
+#endif
+
+}  // namespace
+
 LMENTS_FLATTEN void CortexM4::run(uint64_t untilCycle) {
+  const HostFloatMode hostFloatMode;
   stopRequested_ = false;
   runLimit_ = untilCycle;
   while (cycles_ < untilCycle && !halted_) {
@@ -727,7 +768,7 @@ void CortexM4::branchTo(uint32_t address) {
 // en mémoire entre-temps, le programme est dans une boucle d'attente : chaque tour
 // sera identique jusqu'à la prochaine interruption. On avance alors d'un nombre
 // entier de tours, ce qui donne exactement le même état qu'en les exécutant.
-void CortexM4::branchDirect(uint32_t address) {
+LMENTS_NOINLINE void CortexM4::branchDirect(uint32_t address) {
   branchTo(address);
   if (address > pc_) return;
   const uint32_t status = (static_cast<uint32_t>(n_) << 31) | (static_cast<uint32_t>(z_) << 30) |
@@ -777,7 +818,7 @@ void CortexM4::bxWritePc(uint32_t address) {
 }
 
 // Attente de la flash, cas général : branchement, ou passage au bloc suivant.
-void CortexM4::flashFetch(uint32_t first, uint32_t last) {
+LMENTS_NOINLINE void CortexM4::flashFetch(uint32_t first, uint32_t last) {
   const uint64_t access = 1 + flashWait_;
   if (prefetchFlush_) {
     // Après un branchement : le mot visé part en lecture à la fin du branchement.
@@ -1311,7 +1352,7 @@ void CortexM4::execLoadStoreSingle(uint32_t insn) {
   }
 }
 
-void CortexM4::execBranchMisc(uint32_t insn) {
+LMENTS_NOINLINE void CortexM4::execBranchMisc(uint32_t insn) {
   const uint32_t hw1 = insn >> 16;
   const uint32_t hw2 = insn & 0xffff;
   const uint32_t s = (hw1 >> 10) & 1;
@@ -1367,6 +1408,7 @@ void CortexM4::execBranchMisc(uint32_t insn) {
         controlNpriv_ = value & 1;
         if (ipsr_ == 0) switchStack(value & 2);
         controlFpca_ = value & 4;
+        fpReady_ = false;
         break;
       default: break;
     }
@@ -1807,3 +1849,5 @@ void CortexM4::exec32(uint32_t insn) {
 
 }  // namespace emu
 }  // namespace lments
+
+#include "CortexM4Fpu.inc"

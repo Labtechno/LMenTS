@@ -6,7 +6,7 @@
 // manuel ARMv7-M (FPAdd, FPMul, FPRound...).
 //
 // Ce code est lent : le processeur émulé ne l'appelle que pour les cas rares. Les
-// cas courants passent par le calcul flottant de l'ordinateur (voir CortexM4Fpu.cpp),
+// cas courants passent par le calcul flottant de l'ordinateur (voir CortexM4Fpu.inc),
 // dont le résultat est alors garanti identique par la norme IEEE 754.
 //
 // Écrit pour LMenTS, sans code tiers. Licence MIT.

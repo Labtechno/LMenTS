@@ -9,8 +9,7 @@ endif()
 
 # --- La puce virtuelle (processeur Cortex-M4F) -------------------------------------------
 add_library(lments_emu STATIC
-  Source/emu/CortexM4.cpp
-  Source/emu/CortexM4Fpu.cpp)
+  Source/emu/CortexM4.cpp)
 target_include_directories(lments_emu PUBLIC Source/emu)
 # Le calcul flottant doit rester exactement celui qui est écrit (pas de fusion
 # multiplication-addition décidée par le compilateur).

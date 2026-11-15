@@ -85,7 +85,7 @@ GitHub lance les deux à chaque envoi (onglet **Actions**).
 
 | Dossier | Contenu |
 |---|---|
-| `Source/emu` | la puce virtuelle : processeur (`CortexM4.*`), calcul à virgule (`CortexM4Fpu.cpp`, `SoftFloat.h`) |
+| `Source/emu` | la puce virtuelle : processeur (`CortexM4.*`), calcul à virgule (`CortexM4Fpu.inc`, `SoftFloat.h`) |
 | `tools` | banc d'essai du processeur (`emu_run.cpp`) et tests (`armtests`) |
 | `firmware` | code source du firmware d'Elements, pour les tests et comme référence (voir `firmware/README.md`) |
 

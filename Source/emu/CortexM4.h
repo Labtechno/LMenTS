@@ -60,6 +60,11 @@ class CortexM4 {
   // Le rapport idleCycles / cycles donne aussi le temps libre du processeur.
   uint64_t idleCycles() const { return idleCycles_; }
 
+  // Nombre d'entrées dans chaque exception (16 + n = interruption n), et cycles
+  // passés hors du programme principal. Pour les mesures de charge.
+  uint64_t exceptionCount(int number) const { return exceptionCount_[number]; }
+  uint64_t handlerCycles() const { return handlerCycles_ + (ipsr_ != 0 ? cycles_ - handlerSince_ : 0); }
+
   // Demande à run() de rendre la main après l'instruction en cours.
   void stop() { stopRequested_ = true; irqDirty_ = true; }
 
@@ -120,7 +125,13 @@ class CortexM4 {
   void execFpData(uint32_t insn);
   bool fpCheck();
   void preserveFpState();
-  void setFpscr(uint32_t v) { fpscr_ = v & 0xf7c0009fu; fpFast_ = (fpscr_ & 0x00c00010u) == 0x10u; }
+  void setFpscr(uint32_t v) {
+    fpscr_ = v & 0xf7c0009fu;
+    fpFast_ = (fpscr_ & 0x00c00010u) == 0x10u;
+    fpAnyFinite_ = (fpscr_ & 0x01c00018u) == 0x18u;
+  }
+  enum { kSlowAdd, kSlowSub, kSlowMul, kSlowDiv, kSlowSqrt, kSlowMulAdd };
+  uint32_t fpSlow(int op, uint32_t a, uint32_t b, uint32_t c);
   uint32_t fpAdd(uint32_t a, uint32_t b);
   uint32_t fpSub(uint32_t a, uint32_t b);
   uint32_t fpMul(uint32_t a, uint32_t b);
@@ -173,7 +184,11 @@ class CortexM4 {
   uint32_t s_[32] = {};
   uint32_t fpscr_ = 0;
   bool fpFast_ = false;    // arrondi au plus près et drapeau « inexact » déjà levé
+  // En plus : drapeau « soupassement » déjà levé et pas de flush-to-zero. Les très
+  // petits nombres (dénormalisés) peuvent alors eux aussi être calculés par l'ordinateur.
+  bool fpAnyFinite_ = false;
   bool controlFpca_ = false;
+  bool fpReady_ = false;   // les vérifications d'accès aux flottants sont déjà faites
   uint32_t cpacr_ = 0;
   uint32_t fpccr_ = 0xc0000000u, fpcar_ = 0, fpdscr_ = 0;
   uint32_t itstate_ = 0;
@@ -205,6 +220,8 @@ class CortexM4 {
 
   uint64_t cycles_ = 0;
   uint64_t instructions_ = 0;
+  uint64_t exceptionCount_[kNumExceptions] = {};
+  uint64_t handlerCycles_ = 0, handlerSince_ = 0;
   uint64_t externalDeadline_ = ~uint64_t { 0 };
   uint64_t nextEvent_ = ~uint64_t { 0 };
 
