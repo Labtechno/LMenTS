@@ -43,6 +43,9 @@
 #include <immintrin.h>
 #include <intrin.h>
 #endif
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #endif
 
 #include <algorithm>

@@ -36,6 +36,14 @@ bool hostHasFma() {
   const bool fma = info[2] & (1 << 12), osxsave = info[2] & (1 << 27), avx = info[2] & (1 << 28);
   return fma && osxsave && avx && (_xgetbv(0) & 6) == 6;
 #else
+#if defined(__APPLE__)
+  // Sous Rosetta (programme Intel sur un Mac Apple Silicon), l'instruction est
+  // imitée et son arrondi n'est pas toujours exact (essai « elements » de
+  // run_prebuilt.sh : un écart d'un bit). On ne s'en sert donc pas.
+  int translated = 0;
+  size_t size = sizeof translated;
+  if (sysctlbyname("sysctl.proc_translated", &translated, &size, nullptr, 0) == 0 && translated) return false;
+#endif
   return __builtin_cpu_supports("fma");
 #endif
 }
