@@ -217,7 +217,9 @@ int main(int argc, char** argv) {
       m.machine.controls.gate = true; m.run(0.05);
       m.machine.controls.gate = false; m.run(0.1); m.clear();
       m.run(0.6);
-      f[v] = fundamental(m.left, m.machine.sampleRate());
+      // SPACE à zéro : OUT L porte l'excitateur seul, OUT R le résonateur seul.
+      f[v] = fundamental(m.right, m.machine.sampleRate());
+      if (argc > 3) { char path[256]; std::snprintf(path, sizeof(path), "%s_%dV.wav", argv[3], v); writeWav(path, m.left, m.right, 32000); }
       std::printf("  V/OCT = %d V : %.2f Hz\n", v, f[v]);
       m.run(1.0);
     }

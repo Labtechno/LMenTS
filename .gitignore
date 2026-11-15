@@ -1,5 +1,8 @@
 build*/
 cmake-build-*/
+JUCE
 JUCE/
+firmware-build/
+dist/
 .DS_Store
 *.xcodeproj/

@@ -1,0 +1,14 @@
+#!/bin/bash
+# Désinstallation de LMenTS. Les projets Reason ne sont pas touchés, ni les
+# fichiers de firmware de l'utilisateur, où qu'ils soient.
+. "$(dirname "$0")/user_home.sh"
+rm -rf "/Library/Audio/Plug-Ins/VST3/LMenTS.vst3"
+rm -rf "/Applications/LMenTS.app"
+if [ -n "$USER_HOME" ]; then
+  rm -rf "$USER_HOME/Applications/LMenTS.app" \
+         "$USER_HOME/Library/Application Support/LMenTS.settings"
+fi
+for id in com.labtechno.lments.vst3 com.labtechno.lments.app; do
+  pkgutil --forget "$id" >/dev/null 2>&1 || true
+done
+exit 0

@@ -1,0 +1,133 @@
+# Vérifie l'émulateur, fabrique le plugin et son installateur, à chaque envoi
+# (push) ou à la demande (onglet Actions > Build > Run workflow).
+#
+#   1. Linux : les programmes de test sont recompilés pour la puce, exécutés par
+#      l'émulateur et comparés à QEMU (référence) et à l'ordinateur ; le firmware
+#      d'Elements est recompilé depuis ses sources et démarré dans le module émulé.
+#   2. Mac : le plugin est compilé (Apple Silicon + Intel) et essayé avec ce
+#      firmware ; l'installateur est fabriqué et essayé (installation, mise à jour,
+#      désinstallation).
+#
+# Résultat : page « Releases » du dépôt (LMenTS.dmg, dernière version de la branche
+# emulation), et en bas de la page du « run », rubrique Artifacts.
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # pour publier l'installateur dans « Releases »
+
+jobs:
+  linux:
+    name: Emulateur et firmware (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Outils (compilateur pour la puce, QEMU)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib qemu-system-arm
+      - name: Processeur, instruction par instruction (reference QEMU)
+        run: bash tools/armtests/run_tests.sh
+      - name: Les programmes enregistres donnent le meme resultat
+        run: bash tools/armtests/run_prebuilt.sh clang++
+      - name: Firmware Elements recompile depuis ses sources
+        run: bash tools/build_firmware.sh firmware-build
+      - name: Module complet (demarrage, accord, vitesse)
+        run: |
+          cmake -B build -DLMENTS_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++
+          cmake --build build -j 4
+          ./build/lments_machine_test firmware-build/elements-source.bin boot
+          ./build/lments_machine_test firmware-build/elements-source.bin pitch
+          ./build/lments_machine_test firmware-build/elements-source.bin speed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-de-test
+          path: firmware-build/elements-source.bin
+
+  mac:
+    name: Plugin et installateur (Mac)
+    needs: linux
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware-de-test
+          path: firmware-build
+
+      - name: Compilation (VST3, application, essais)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+          cmake --build build --config Release -j 4 --target LMenTS_VST3 LMenTS_Standalone lments_plugin_test lments_machine_test
+          lipo -info build/LMenTS_artefacts/Release/VST3/LMenTS.vst3/Contents/MacOS/LMenTS
+
+      - name: Essai du plugin avec le firmware (Apple Silicon)
+        run: |
+          sysctl -n machdep.cpu.brand_string
+          printf 'pas un firmware' > invalide.bin
+          ./build/lments_plugin_test_artefacts/Release/lments_plugin_test firmware-build/elements-source.bin invalide.bin
+          ./build/lments_machine_test firmware-build/elements-source.bin speed
+
+      - name: Processeur emule sur Mac (Apple Silicon, puis Intel via Rosetta)
+        run: |
+          bash tools/armtests/run_prebuilt.sh clang++ -arch arm64
+          softwareupdate --install-rosetta --agree-to-license || true
+          OUT=/tmp/lments-prebuilt-intel bash tools/armtests/run_prebuilt.sh clang++ -arch x86_64
+
+      - name: Installateur et desinstallateur
+        run: bash installer/build_pkg.sh build/LMenTS_artefacts/Release dist
+
+      - name: Essai sur ce Mac (installation, mise a jour, desinstallation)
+        run: |
+          set -x
+          sudo installer -pkg "dist/Installer LMenTS.pkg" -target /
+          test -d /Library/Audio/Plug-Ins/VST3/LMenTS.vst3
+          test -d /Applications/LMenTS.app
+          codesign --verify --deep --verbose=2 /Library/Audio/Plug-Ins/VST3/LMenTS.vst3
+          lipo -info /Library/Audio/Plug-Ins/VST3/LMenTS.vst3/Contents/MacOS/LMenTS
+          # Mise à jour : un vieux fichier dans l'ancien plugin doit disparaître.
+          sudo touch /Library/Audio/Plug-Ins/VST3/LMenTS.vst3/Contents/vieux-fichier
+          sudo installer -pkg "dist/Installer LMenTS.pkg" -target /
+          test ! -e /Library/Audio/Plug-Ins/VST3/LMenTS.vst3/Contents/vieux-fichier
+          # Désinstallation : tout part, un firmware de l'utilisateur reste.
+          mkdir -p "$HOME/Documents/Firmwares" && touch "$HOME/Documents/Firmwares/mon-firmware.bin"
+          sudo installer -pkg "dist/Désinstaller LMenTS.pkg" -target /
+          test ! -e /Library/Audio/Plug-Ins/VST3/LMenTS.vst3
+          test ! -e /Applications/LMenTS.app
+          test -e "$HOME/Documents/Firmwares/mon-firmware.bin"
+          if pkgutil --pkgs | grep -qE "com.labtechno.lments.(vst3|app)$"; then exit 1; fi
+          hdiutil imageinfo dist/LMenTS.dmg | head -5
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LMenTS-macOS
+          path: dist/LMenTS.dmg
+
+      - name: Publication dans « Releases »
+        if: github.ref == 'refs/heads/emulation'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(sed -n 's/^project(LMenTS VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          cat > notes.md <<NOTES
+          Version $VERSION, compilée le $(date -u '+%d/%m/%Y') depuis la branche emulation (${GITHUB_SHA::7}). Version d'essai (étape 2).
+
+          ## Installation
+
+          1. Télécharge **LMenTS.dmg** ci-dessous et ouvre-le : il contient **Installer LMenTS** et **Désinstaller LMenTS**.
+          2. Double-clique sur **Installer LMenTS**. macOS refuse la première fois, car LMenTS n'est pas signé par Apple : clique sur **OK**.
+          3. Ouvre **Réglages Système > Confidentialité et sécurité**, descends jusqu'au message sur Installer LMenTS et clique sur **Ouvrir quand même**, puis confirme.
+          4. Suis l'installateur : Continuer, Installer, ton mot de passe de session.
+          5. Relance Reason : LMenTS est dans **Plugins**, fabricant **Labtechno**.
+          6. Dans le plugin, clique sur **Charger un firmware…** et choisis le fichier de mise à jour officiel (**elements_1.1.wav**), ou dépose-le sur le plugin. Il est ensuite gardé dans le projet Reason.
+
+          **Mise à jour** : lance l'installateur d'une version plus récente, il remplace l'ancienne.
+          **Désinstaller** : double-clique sur **Désinstaller LMenTS** (même premier passage par « Ouvrir quand même »). Tes projets Reason et tes fichiers de firmware ne sont pas touchés.
+          NOTES
+          sed -i '' 's/^          //' notes.md
+          gh release delete derniere-version --yes --cleanup-tag 2>/dev/null || true
+          gh release create derniere-version dist/LMenTS.dmg \
+            --target "$GITHUB_SHA" --title "LMenTS $VERSION — Mac (essai)" --notes-file notes.md --prerelease
