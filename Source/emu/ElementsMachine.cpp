@@ -172,7 +172,7 @@ void ElementsMachine::updateAudioClock() {
     const uint64_t i2sN = (rccPllI2sCfgr_ >> 6) & 0x1ff, i2sR = (rccPllI2sCfgr_ >> 28) & 7;
     if (div && m && i2sN && i2sR) {
       // Horloge I2S = 8 MHz / m x i2sN / i2sR ; échantillons par seconde = horloge / (frame x div).
-      const unsigned __int128 num = static_cast<unsigned __int128>(cpuHz() + 0.5) * frame * div * i2sR * m;
+      const unsigned __int128 num = static_cast<unsigned __int128>(static_cast<uint64_t>(cpuHz() + 0.5)) * frame * div * i2sR * m;
       const uint64_t den = uint64_t { 8000000 } * i2sN;
       uint64_t remainder;
       period = static_cast<uint64_t>(sf::divide128(num << 32, den, remainder));
