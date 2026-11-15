@@ -95,10 +95,16 @@ if(LMENTS_BUILD_PLUGIN)
 
   # Essai du plugin sans logiciel hôte : charge un firmware, joue, sauve et relit l'état.
   if(LMENTS_BUILD_TOOLS)
+    # Le programme d'essai recompile le code du plugin avec JUCE, sans se lier à la
+    # bibliothèque du plugin (sous Windows, JUCE y serait sinon présent deux fois).
     juce_add_console_app(lments_plugin_test)
-    target_sources(lments_plugin_test PRIVATE tools/plugin_test.cpp)
+    target_sources(lments_plugin_test PRIVATE
+      tools/plugin_test.cpp
+      Source/PluginProcessor.cpp
+      Source/PluginEditor.cpp)
     target_include_directories(lments_plugin_test PRIVATE Source Source/hw Source/engine)
     target_compile_definitions(lments_plugin_test PRIVATE JucePlugin_Name="LMenTS" JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
-    target_link_libraries(lments_plugin_test PRIVATE LMenTS lments_emu juce::juce_audio_utils)
+    target_link_libraries(lments_plugin_test PRIVATE lments_emu juce::juce_audio_utils
+      juce::juce_recommended_config_flags)
   endif()
 endif()

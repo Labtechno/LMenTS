@@ -1,6 +1,6 @@
 # LMenTS
 
-Plugin VST3 pour Reason (Mac) : le **vrai firmware** du module Eurorack **Elements**
+Plugin VST3 pour Reason (Mac et Windows) : le **vrai firmware** du module Eurorack **Elements**
 tourne dans une **émulation de sa puce** (STM32F405, processeur Cortex-M4F).
 Ce n'est pas une imitation du son : c'est le programme du module, exécuté
 instruction par instruction.
@@ -15,19 +15,39 @@ Projet indépendant, sans lien avec le fabricant du module.
 | 2 | Périphériques de la puce, carte du module, plugin : le firmware démarre, les potards, les CV, les LED et le son marchent | fait (version d'essai) |
 | 3 | Chargement des firmwares, mémoire séparée par firmware, sauvée dans le projet | fait |
 | 4 | Temps d'accès mémoire, jauge d'occupation du processeur, craquements en cas de surcharge | fait |
-| 5 | Optimisation, installateur Mac définitif, version Windows et son installateur | à faire |
+| 5 | Optimisation, installateur Mac définitif, version Windows et son installateur | fait |
 
 ## Installer la version d'essai
 
-1. Page **Releases** du dépôt : télécharge **LMenTS.dmg** et ouvre-le.
+Page **Releases** du dépôt, version « derniere-version ».
+
+**Mac** (Apple Silicon et Intel) :
+
+1. Télécharge **LMenTS.dmg** et ouvre-le.
 2. Double-clique sur **Installer LMenTS**. La première fois, macOS refuse (LMenTS
    n'est pas signé par Apple) : **Réglages Système > Confidentialité et sécurité >
    Ouvrir quand même**.
-3. Relance Reason : LMenTS est dans **Plugins**, fabricant **Labtechno**.
-4. Dans le plugin : **Charger un firmware…**, puis le fichier de mise à jour
+3. Pour retirer LMenTS : **Désinstaller LMenTS**, dans le même .dmg.
+
+**Windows** (64 bits) :
+
+1. Télécharge **LMenTS-Windows-Installer.exe** et double-clique dessus.
+2. Windows affiche « Windows a protégé votre ordinateur » (LMenTS n'est pas
+   signé) : **Informations complémentaires**, puis **Exécuter quand même**.
+3. Le plugin va dans `C:\Program Files\Common Files\VST3`, le dossier que lit
+   Reason, et l'application dans `C:\Program Files\LMenTS`.
+4. Pour retirer LMenTS : menu Démarrer > LMenTS > **Désinstaller LMenTS**, ou
+   Paramètres > Applications.
+
+Ensuite, sur les deux :
+
+1. Relance Reason : LMenTS est dans **Plugins**, fabricant **Labtechno**.
+2. Dans le plugin : **Charger un firmware…**, puis le fichier de mise à jour
    officiel du module (`elements_1.1.wav`), ou un `.bin`. On peut aussi déposer le
    fichier sur le plugin. Le firmware est ensuite gardé dans le projet Reason.
 
+Une nouvelle version s'installe par-dessus l'ancienne, qui est retirée. La
+désinstallation ne touche ni aux projets Reason ni aux fichiers de firmware.
 Aucun firmware n'est fourni avec le plugin.
 
 ## Le plugin dans Reason
@@ -46,8 +66,8 @@ Aucun firmware n'est fourni avec le plugin.
 - **Accord** : avec COARSE à sa position par défaut, la note jouée au clavier est
   la note entendue (vérifié : la 3 = 220,0 Hz).
 - **Jauges** : occupation de la puce du module (moyenne en barre, pointe en
-  trait ; voir « La charge de la puce » ci-dessous) et part d'un cœur de ton Mac
-  utilisée par l'émulation. En cas de surcharge, le plugin l'écrit en rouge.
+  trait ; voir « La charge de la puce » ci-dessous) et part d'un cœur de ton
+  ordinateur utilisée par l'émulation. En cas de surcharge, le plugin l'écrit en rouge.
 
 ## La charge de la puce
 
@@ -95,7 +115,7 @@ ce cas lourd, ce que le vrai module ne fait pas.
 ## Firmwares et mémoire
 
 - **Charger** : bouton « Charger un firmware… », menu « Récents ▾ » (les dix
-  derniers fichiers ouverts sur ce Mac), ou fichier déposé sur le plugin. Formats :
+  derniers fichiers ouverts sur cet ordinateur), ou fichier déposé sur le plugin. Formats :
   le `.wav` de mise à jour officiel, ou une image `.bin` (par exemple un firmware
   recompilé avec `tools/build_firmware.sh`).
 - **Chaque firmware a sa propre mémoire**, comme un module qu'on mettrait à jour
@@ -171,20 +191,6 @@ et elles montrent pourquoi émuler la puce vaut mieux que recompiler le code :
 | Projet enregistré par la version de l'étape 2 | ses réglages sont repris |
 | Faux firmware (une boucle sans fin) | chargé, puis signalé : « n'a pas démarré le son » |
 
-### Ce qui n'est pas encore vérifié
-
-- **Rien n'a été essayé dans Reason** ni sur ton Mac : les essais du plugin
-  tournent sur GitHub, sans logiciel hôte.
-- **Rien n'a été comparé à un vrai module.**
-- **La jauge de la puce du module** est une estimation recalée sur un seul
-  repère (voir « La charge de la puce »), pas une mesure sur un vrai module.
-- **La vitesse sur un M4 Max** n'est pas mesurée. Le modèle de la flash et des
-  durées d'instructions a rendu l'émulateur environ 25 à 30 % plus lent qu'à
-  l'étape 3 ; l'optimisation est prévue à l'étape 5 (voir l'onglet Actions pour
-  la mesure sur le Mac M1 de GitHub).
-- **L'électronique analogique** (étages d'entrée, convertisseur audio, sortie) est
-  idéale : les valeurs viennent des réglages d'usine du firmware, pas des schémas.
-
 ## Ce qui est vérifié à l'étape 4
 
 | Essai | Résultat |
@@ -211,8 +217,15 @@ programmes de test sont fournis déjà compilés, avec leurs résultats de réf�
 bash tools/armtests/run_prebuilt.sh
 ```
 
+Le même script marche sous Windows (Git Bash, avec Clang de LLVM).
+
 GitHub lance tout cela à chaque envoi, puis fabrique et essaie le plugin et
-son installateur sur un Mac (onglet **Actions**).
+ses installateurs sur un Mac et sur un PC Windows (onglet **Actions**).
+
+Pour compiler le plugin soi-même : `cmake -B build` puis `cmake --build build
+--config Release` sur Mac ; sous Windows, avec Visual Studio et son composant
+« Clang » : `cmake -B build -A x64 -T ClangCL` (l'émulateur demande Clang, le
+compilateur de Microsoft ne suffit pas).
 
 ## Organisation
 
@@ -222,7 +235,7 @@ son installateur sur un Mac (onglet **Actions**).
 | `Source/hw` | la façade : potards, prises et étages d'entrée (`Panel.h`) |
 | `Source` | le plugin (`PluginProcessor.*`, `PluginEditor.*`) et la conversion de fréquence (`engine/Resampler.h`) |
 | `tools` | essais du processeur (`armtests`), du module (`machine_test.cpp`), du plugin (`plugin_test.cpp`), recompilation du firmware (`build_firmware.sh`) |
-| `installer` | fabrication de l'installateur Mac |
+| `installer` | fabrication des installateurs : Mac (`build_pkg.sh`), Windows (`windows/LMenTS.iss`, Inno Setup) |
 | `firmware` | code source du firmware d'Elements, pour les tests et comme référence (voir `firmware/README.md`) |
 
 ## Licences
