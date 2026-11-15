@@ -79,6 +79,19 @@ inline uint32_t processNaN(Type type, uint32_t op, uint32_t& fpscr) {
 
 inline uint32_t invalid(uint32_t& fpscr) { fpscr |= kIOC; return kDefaultNaN; }
 
+// Division d'un nombre de 128 bits par un nombre de 64 bits, bit par bit. Le
+// compilateur ne la fournit pas sous Windows (il faudrait une bibliothèque en
+// plus) ; elle ne sert que dans les cas rares, la lenteur n'a pas d'importance.
+inline u128 divide128(u128 numerator, uint64_t denominator, uint64_t& remainder) {
+  u128 quotient = 0, rest = 0;
+  for (int i = 127; i >= 0; --i) {
+    rest = (rest << 1) | ((numerator >> i) & 1);
+    if (rest >= denominator) { rest -= denominator; quotient |= u128 { 1 } << i; }
+  }
+  remainder = static_cast<uint64_t>(rest);
+  return quotient;
+}
+
 inline int msb128(u128 m) {
   const uint64_t hi = static_cast<uint64_t>(m >> 64);
   if (hi) return 127 - __builtin_clzll(hi);
@@ -236,8 +249,9 @@ inline uint32_t div(uint32_t a, uint32_t b, uint32_t& fpscr) {
   }
   if (x.type == kZero || y.type == kInf) return sign;
   const u128 num = static_cast<u128>(x.mant) << 64;
-  const u128 q = num / y.mant;
-  const bool sticky = (num % y.mant) != 0;
+  uint64_t remainder;
+  const u128 q = divide128(num, y.mant, remainder);
+  const bool sticky = remainder != 0;
   return roundPack(sign != 0, q, x.exp - y.exp - 64, sticky, fpscr);
 }
 

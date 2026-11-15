@@ -4,12 +4,14 @@
 #   1. Linux : les programmes de test sont recompilés pour la puce, exécutés par
 #      l'émulateur et comparés à QEMU (référence) et à l'ordinateur ; le firmware
 #      d'Elements est recompilé depuis ses sources et démarré dans le module émulé.
-#   2. Mac : le plugin est compilé (Apple Silicon + Intel) et essayé avec ce
-#      firmware ; l'installateur est fabriqué et essayé (installation, mise à jour,
-#      désinstallation).
+#   2. Mac et Windows : le plugin est compilé (Mac : Apple Silicon + Intel ;
+#      Windows : 64 bits) et essayé avec ce firmware ; l'installateur est fabriqué
+#      et essayé (installation, mise à jour, désinstallation).
+#   3. Publication : les deux installateurs vont dans « Releases ».
 #
-# Résultat : page « Releases » du dépôt (LMenTS.dmg, dernière version de la branche
-# emulation), et en bas de la page du « run », rubrique Artifacts.
+# Résultat : page « Releases » du dépôt (LMenTS.dmg et LMenTS-Windows-Installer.exe,
+# dernière version de la branche emulation), et en bas de la page du « run »,
+# rubrique Artifacts.
 name: Build
 
 on:
@@ -45,6 +47,10 @@ jobs:
           ./build/lments_machine_test firmware-build/elements-source.bin boot
           ./build/lments_machine_test firmware-build/elements-source.bin pitch
           ./build/lments_machine_test firmware-build/elements-source.bin speed
+      - name: Le chemin rapide de l'emulateur donne exactement le meme son
+        run: |
+          ./build/lments_machine_test firmware-build/elements-source.bin fastpath
+          ./build/lments_machine_test firmware-build/elements-64modes.bin fastpath
       - name: Charge de la puce (repere de l'auteur - 52 modes passe, 56 tres juste)
         run: |
           ./build/lments_machine_test firmware-build/elements-source.bin cpu 99
@@ -117,28 +123,122 @@ jobs:
           name: LMenTS-macOS
           path: dist/LMenTS.dmg
 
-      - name: Publication dans « Releases »
-        if: github.ref == 'refs/heads/emulation'
+  windows:
+    name: Plugin et installateur (Windows)
+    needs: linux
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware-de-test
+          path: firmware-build
+
+      - name: Compilation avec clang-cl (VST3, application, essais)
+        run: |
+          cmake -B build -A x64 -T ClangCL
+          cmake --build build --config Release -j 4 --target LMenTS_VST3 LMenTS_Standalone lments_plugin_test lments_machine_test
+          find build/LMenTS_artefacts/Release -maxdepth 4 | head -20
+
+      - name: Essai du plugin avec le firmware (PC)
+        run: |
+          printf 'pas un firmware' > invalide.bin
+          LMENTS_HEAVY_FIRMWARE=firmware-build/elements-64modes.bin \
+            ./build/lments_plugin_test_artefacts/Release/lments_plugin_test.exe firmware-build/elements-source.bin invalide.bin
+          ./build/Release/lments_machine_test.exe firmware-build/elements-source.bin boot
+          ./build/Release/lments_machine_test.exe firmware-build/elements-source.bin fastpath
+          ./build/Release/lments_machine_test.exe firmware-build/elements-source.bin speed
+
+      - name: Processeur emule sur PC (resultats enregistres)
+        run: bash tools/armtests/run_prebuilt.sh clang++
+
+      - name: Installateur et desinstallateur (Inno Setup)
+        run: |
+          VERSION="$(sed -n 's/^project(LMenTS VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
+          ISCC="/c/Program Files (x86)/Inno Setup 6/ISCC.exe"
+          if [ ! -f "$ISCC" ]; then choco install innosetup -y --no-progress; fi
+          ART="$(cygpath -w "$PWD/build/LMenTS_artefacts/Release")"
+          OUT="$(cygpath -w "$PWD/dist")"
+          MSYS2_ARG_CONV_EXCL='*' "$ISCC" /DVersion="$VERSION" /DArtefacts="$ART" /DOutDir="$OUT" "$(cygpath -w installer/windows/LMenTS.iss)"
+
+      - name: Essai sur ce PC (installation, mise a jour, desinstallation)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vst3 = "$env:CommonProgramFiles\VST3\LMenTS.vst3"
+          $app = "$env:ProgramFiles\LMenTS\LMenTS.exe"
+          function Run($exe, $arguments) { $p = Start-Process $exe -ArgumentList $arguments -Wait -PassThru; if ($p.ExitCode -ne 0) { throw "$exe : code $($p.ExitCode)" } }
+          $quiet = '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART'
+          Run "dist\LMenTS-Windows-Installer.exe" $quiet
+          if (-not (Test-Path $vst3) -or -not (Test-Path $app)) { throw "installation incomplete" }
+          Get-ChildItem -Recurse $vst3 | Select-Object FullName
+          # Mise à jour : un vieux fichier dans l'ancien plugin doit disparaître.
+          New-Item -ItemType File "$vst3\Contents\vieux-fichier" | Out-Null
+          Run "dist\LMenTS-Windows-Installer.exe" $quiet
+          if (Test-Path "$vst3\Contents\vieux-fichier") { throw "l'ancienne version n'a pas ete retiree" }
+          # Désinstallation : tout part, un firmware de l'utilisateur reste.
+          New-Item -ItemType Directory -Force "$env:USERPROFILE\Documents\Firmwares" | Out-Null
+          New-Item -ItemType File -Force "$env:USERPROFILE\Documents\Firmwares\mon-firmware.bin" | Out-Null
+          Run "$env:ProgramFiles\LMenTS\unins000.exe" $quiet
+          Start-Sleep -Seconds 3
+          if ((Test-Path $vst3) -or (Test-Path $app)) { throw "desinstallation incomplete" }
+          if (-not (Test-Path "$env:USERPROFILE\Documents\Firmwares\mon-firmware.bin")) { throw "un fichier de l'utilisateur a disparu" }
+          Write-Output "installation, mise a jour et desinstallation : OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LMenTS-Windows
+          path: dist/LMenTS-Windows-Installer.exe
+
+  publication:
+    name: Publication dans Releases
+    needs: [mac, windows]
+    if: github.ref == 'refs/heads/emulation'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ls -l dist
           VERSION="$(sed -n 's/^project(LMenTS VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)"
           cat > notes.md <<NOTES
-          Version $VERSION, compilée le $(date -u '+%d/%m/%Y') depuis la branche emulation (${GITHUB_SHA::7}). Version d'essai (étape 4).
+          Version $VERSION, compilée le $(date -u '+%d/%m/%Y') depuis la branche emulation (${GITHUB_SHA::7}). Version d'essai (étape 5).
 
-          ## Installation
+          Aucun firmware n'est fourni : au premier lancement, clique sur **Charger un firmware…** et choisis le fichier de mise à jour officiel du module (**elements_1.1.wav**), ou un fichier **.bin**. Il est ensuite gardé dans le projet Reason.
+
+          ## Mac : LMenTS.dmg
 
           1. Télécharge **LMenTS.dmg** ci-dessous et ouvre-le : il contient **Installer LMenTS** et **Désinstaller LMenTS**.
           2. Double-clique sur **Installer LMenTS**. macOS refuse la première fois, car LMenTS n'est pas signé par Apple : clique sur **OK**.
           3. Ouvre **Réglages Système > Confidentialité et sécurité**, descends jusqu'au message sur Installer LMenTS et clique sur **Ouvrir quand même**, puis confirme.
           4. Suis l'installateur : Continuer, Installer, ton mot de passe de session.
           5. Relance Reason : LMenTS est dans **Plugins**, fabricant **Labtechno**.
-          6. Dans le plugin, clique sur **Charger un firmware…** et choisis le fichier de mise à jour officiel (**elements_1.1.wav**), ou dépose-le sur le plugin. Il est ensuite gardé dans le projet Reason.
 
-          **Mise à jour** : lance l'installateur d'une version plus récente, il remplace l'ancienne.
-          **Désinstaller** : double-clique sur **Désinstaller LMenTS** (même premier passage par « Ouvrir quand même »). Tes projets Reason et tes fichiers de firmware ne sont pas touchés.
+          **Désinstaller** : double-clique sur **Désinstaller LMenTS** (même premier passage par « Ouvrir quand même »).
+
+          ## Windows : LMenTS-Windows-Installer.exe
+
+          1. Télécharge **LMenTS-Windows-Installer.exe** ci-dessous et double-clique dessus.
+          2. Windows affiche « Windows a protégé votre ordinateur », car LMenTS n'est pas signé : clique sur **Informations complémentaires**, puis **Exécuter quand même**.
+          3. Suis l'installateur (en français). Le plugin va dans le dossier VST3 commun, que Reason lit.
+          4. Relance Reason : LMenTS est dans **Plugins**, fabricant **Labtechno**.
+
+          **Désinstaller** : menu Démarrer > LMenTS > **Désinstaller LMenTS**, ou Paramètres > Applications.
+
+          ## Mise à jour
+
+          Lance l'installateur d'une version plus récente : il remplace l'ancienne. La désinstallation ne touche ni à tes projets Reason ni à tes fichiers de firmware.
           NOTES
-          sed -i '' 's/^          //' notes.md
+          sed -i 's/^          //' notes.md
           gh release delete derniere-version --yes --cleanup-tag 2>/dev/null || true
-          gh release create derniere-version dist/LMenTS.dmg \
-            --target "$GITHUB_SHA" --title "LMenTS $VERSION — Mac (essai)" --notes-file notes.md --prerelease
+          gh release create derniere-version dist/LMenTS.dmg dist/LMenTS-Windows-Installer.exe \
+            --target "$GITHUB_SHA" --title "LMenTS $VERSION — Mac et Windows (essai)" --notes-file notes.md --prerelease

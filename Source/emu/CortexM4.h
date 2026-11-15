@@ -88,6 +88,15 @@ class CortexM4 {
   // Prochaine échéance des périphériques (en cycles). ~0 = aucune.
   void setExternalDeadline(uint64_t cycle);
 
+  // Le contenu de la flash a changé entre `offset` et `offset + size` (octets depuis
+  // le début de la flash) : les instructions décodées de cette zone sont oubliées.
+  // À appeler par la carte après toute écriture ou tout effacement de la flash.
+  void flashChanged(uint32_t offset, uint32_t size);
+
+  // Pour les essais : coupe le chemin rapide (instructions déjà décodées). Le
+  // résultat doit être exactement le même, cycles compris (machine_test fastpath).
+  void setFastPath(bool enabled) { fastPath_ = enabled; }
+
   // Arrêt sur erreur fatale (instruction inconnue en HardFault, lockup...).
   bool halted() const { return halted_; }
   const char* haltReason() const { return haltReason_; }
@@ -125,6 +134,25 @@ class CortexM4 {
   void execParallel(uint32_t insn);
   void execCoprocessor(uint32_t insn);
   void execFpData(uint32_t insn);
+  void fpArith(uint32_t group, bool op, uint32_t d, uint32_t n, uint32_t m);
+  void fpMoveRegister(uint32_t d, uint32_t m);
+
+  // Instructions déjà décodées (chemin rapide de step()). Le programme ne change
+  // pas pendant qu'il tourne : chaque instruction de la flash n'est décodée
+  // qu'une fois. Seules les plus fréquentes dans Elements ont un chemin rapide
+  // (calculs flottants, VMOV, VLDR / VSTR) ; les autres gardent le chemin normal.
+  // Le résultat (registres, mémoire, cycles) est exactement le même.
+  enum : uint8_t { kDecUnknown = 0, kDecNormal, kDecFpArith, kDecFpMove, kDecFpMoveImm, kDecVldr, kDecVstr, kDecFpOther };
+  struct Decoded {
+    uint8_t kind;
+    uint8_t d, n, m;     // registres (pour VLDR / VSTR : n = registre de base)
+    uint32_t value;      // groupe | op << 4 (calcul), constante (VMOV), décalage (VLDR / VSTR),
+                         // instruction complète (autres instructions flottantes)
+  };
+  std::vector<Decoded> decoded_;    // une entrée par demi-mot de la flash
+  bool fastPath_ = true;
+  void decodeAt(uint32_t offset);
+  void fastStep(const Decoded& dc);
   void fpOtherTiming(uint32_t hw1, uint32_t hw2, uint32_t d, uint32_t m, uint32_t last);
   void fpConsume(uint32_t reg);
   bool fpCheck();

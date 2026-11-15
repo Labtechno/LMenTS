@@ -25,6 +25,23 @@ namespace emu {
 
 namespace {
 
+#if (defined(__x86_64__) || defined(__i386__)) && !defined(__FMA__)
+// Processeurs Intel / AMD : l'instruction « fused multiply-add » existe sur la
+// plupart des modèles récents, mais pas sur tous. On vérifie au démarrage.
+__attribute__((target("fma"))) float hardwareFma(float a, float b, float c) { return __builtin_fmaf(a, b, c); }
+bool hostHasFma() {
+#if defined(_MSC_VER)
+  int info[4];
+  __cpuid(info, 1);
+  const bool fma = info[2] & (1 << 12), osxsave = info[2] & (1 << 27), avx = info[2] & (1 << 28);
+  return fma && osxsave && avx && (_xgetbv(0) & 6) == 6;
+#else
+  return __builtin_cpu_supports("fma");
+#endif
+}
+const bool kHostHasFma = hostHasFma();
+#endif
+
 inline float asFloat(uint32_t bits) { float f; std::memcpy(&f, &bits, 4); return f; }
 inline uint32_t asBits(float f) { uint32_t bits; std::memcpy(&bits, &f, 4); return bits; }
 
@@ -149,6 +166,13 @@ uint32_t CortexM4::fpMulAdd(uint32_t addend, uint32_t a, uint32_t b) {
 #if defined(__aarch64__) || defined(__FMA__)
     const uint32_t r = asBits(__builtin_fmaf(asFloat(a), asFloat(b), asFloat(addend)));
 #else
+    uint32_t r;
+#if defined(__x86_64__) || defined(__i386__)
+    if (kHostHasFma) {
+      r = asBits(hardwareFma(asFloat(a), asFloat(b), asFloat(addend)));
+    } else
+#endif
+    {
     // Sans instruction « fused multiply-add » : calcul en double précision. Le
     // produit de deux float y est exact ; la somme est rendue « impaire » quand elle
     // n'est pas exacte, ce qui garantit que l'arrondi final vers float est le bon.
@@ -165,7 +189,8 @@ uint32_t CortexM4::fpMulAdd(uint32_t addend, uint32_t a, uint32_t b) {
         std::memcpy(&s, &bits, 8);
       }
     }
-    const uint32_t r = asBits(static_cast<float>(s));
+    r = asBits(static_cast<float>(s));
+    }
 #endif
     if (anyFinite ? isFinite(r) : isSafeProduct(r)) return r;
     // Zéro exact : produit nul plus zéro. L'ordinateur donne le bon signe.
@@ -219,6 +244,59 @@ inline void CortexM4::fpConsume(uint32_t reg) {
   if (fpLastAt_ + 1 == instructions_ && reg == fpLastDest_) ++cycles_;
 }
 
+// Les calculs les plus fréquents (multiplications-additions, multiplications,
+// additions), une fois l'instruction décodée. Appelé par execFpData et par le
+// chemin rapide de step() (instructions déjà décodées, voir decodeAt).
+// Durées : voir le commentaire au début de ce fichier (« Durée des opérations »).
+__attribute__((always_inline)) inline void CortexM4::fpArith(uint32_t group, bool op, uint32_t d, uint32_t n, uint32_t m) {
+  const uint32_t sm = s_[m];
+  const bool chained = fpLastAt_ + 1 == instructions_;
+  const uint32_t last = chained ? fpLastDest_ : 0xffu;
+  fpLastAt_ = instructions_;
+  switch (group) {
+    case 0x0: {  // VMLA / VMLS
+      cycles_ += ((chained && fpLastMac_) ? 1 : 2) + (n == last || m == last); fpLastDest_ = d; fpLastMac_ = true;
+      uint32_t p = fpMul(s_[n], sm);
+      if (op) p ^= kSign;
+      s_[d] = fpAdd(s_[d], p);
+      return;
+    }
+    case 0x1: {  // VNMLS / VNMLA
+      cycles_ += ((chained && fpLastMac_) ? 1 : 2) + (n == last || m == last); fpLastDest_ = d; fpLastMac_ = true;
+      uint32_t p = fpMul(s_[n], sm);
+      if (op) p ^= kSign;
+      s_[d] = fpAdd(s_[d] ^ kSign, p);
+      return;
+    }
+    case 0x2:   // VMUL / VNMUL
+      cycles_ += n == last || m == last; fpLastDest_ = d; fpLastMac_ = false;
+      s_[d] = fpMul(s_[n], sm) ^ (op ? kSign : 0);
+      return;
+    case 0x3:   // VADD / VSUB
+      cycles_ += n == last || m == last; fpLastDest_ = d; fpLastMac_ = false;
+      s_[d] = op ? fpSub(s_[n], sm) : fpAdd(s_[n], sm);
+      return;
+    case 0x9:  // VFNMS / VFNMA
+      cycles_ += ((chained && fpLastMac_) ? 1 : 2) + (n == last || m == last); fpLastDest_ = d; fpLastMac_ = true;
+      s_[d] = fpMulAdd(s_[d] ^ kSign, op ? (s_[n] ^ kSign) : s_[n], sm);
+      return;
+    default:   // 0xa : VFMA / VFMS
+      cycles_ += ((chained && fpLastMac_) ? 1 : 2) + (n == last || m == last); fpLastDest_ = d; fpLastMac_ = true;
+      s_[d] = fpMulAdd(s_[d], op ? (s_[n] ^ kSign) : s_[n], sm);
+      return;
+  }
+}
+
+// VMOV entre registres flottants.
+__attribute__((always_inline)) inline void CortexM4::fpMoveRegister(uint32_t d, uint32_t m) {
+  const bool chained = fpLastAt_ + 1 == instructions_;
+  cycles_ += chained && m == fpLastDest_;
+  fpLastAt_ = instructions_;
+  fpLastDest_ = 0xffu;
+  fpLastMac_ = false;
+  s_[d] = s_[m];
+}
+
 // Opérations de calcul (VADD, VMUL, VCVT...), simple précision uniquement.
 void CortexM4::execFpData(uint32_t insn) {
   ++changes_;   // une boucle d'attente ne calcule pas en flottant
@@ -228,51 +306,21 @@ void CortexM4::execFpData(uint32_t insn) {
   const uint32_t n = ((hw1 & 15) << 1) | ((hw2 >> 7) & 1);
   const uint32_t m = ((hw2 & 15) << 1) | ((hw2 >> 5) & 1);
   const bool op = hw2 & 0x40;
+  const uint32_t group = (hw1 >> 4) & 0xb;
+  if (group <= 0x3 || group == 0x9 || group == 0xa) { fpArith(group, op, d, n, m); return; }
   const uint32_t sm = s_[m];
   uint32_t env;
-  // Durées : voir le commentaire au début de ce fichier (« Durée des opérations »).
   const bool chained = fpLastAt_ + 1 == instructions_;
   const uint32_t last = chained ? fpLastDest_ : 0xffu;
-  const uint64_t macCycles = ((chained && fpLastMac_) ? 1 : 2) + (n == last || m == last);
   const uint64_t arithCycles = n == last || m == last;
   fpLastAt_ = instructions_;
 
-  switch ((hw1 >> 4) & 0xb) {
-    case 0x0: {  // VMLA / VMLS
-      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
-      uint32_t p = fpMul(s_[n], sm);
-      if (op) p ^= kSign;
-      s_[d] = fpAdd(s_[d], p);
-      return;
-    }
-    case 0x1: {  // VNMLS / VNMLA
-      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
-      uint32_t p = fpMul(s_[n], sm);
-      if (op) p ^= kSign;
-      s_[d] = fpAdd(s_[d] ^ kSign, p);
-      return;
-    }
-    case 0x2:   // VMUL / VNMUL
-      cycles_ += arithCycles; fpLastDest_ = d; fpLastMac_ = false;
-      s_[d] = fpMul(s_[n], sm) ^ (op ? kSign : 0);
-      return;
-    case 0x3:   // VADD / VSUB
-      cycles_ += arithCycles; fpLastDest_ = d; fpLastMac_ = false;
-      s_[d] = op ? fpSub(s_[n], sm) : fpAdd(s_[n], sm);
-      return;
+  switch (group) {
     case 0x8:
       if (op) break;
       cycles_ += arithCycles; fpLastDest_ = d; fpLastMac_ = false;
       s_[d] = fpDiv(s_[n], sm);
       cycles_ += 13;
-      return;
-    case 0x9:  // VFNMS / VFNMA
-      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
-      s_[d] = fpMulAdd(s_[d] ^ kSign, op ? (s_[n] ^ kSign) : s_[n], sm);
-      return;
-    case 0xa:  // VFMA / VFMS
-      cycles_ += macCycles; fpLastDest_ = d; fpLastMac_ = true;
-      s_[d] = fpMulAdd(s_[d], op ? (s_[n] ^ kSign) : s_[n], sm);
       return;
     case 0xb: {
       // VMOV entre registres et VMOV immédiat, les plus fréquents, traités ici.
@@ -281,10 +329,7 @@ void CortexM4::execFpData(uint32_t insn) {
       else fpOtherTiming(hw1, hw2, d, m, last);
       fpLastMac_ = false;
       if (!op) {  // VMOV immédiat
-        const uint32_t imm8 = ((hw1 & 15) << 4) | (hw2 & 15);
-        const uint32_t b6 = (imm8 >> 6) & 1;
-        const uint32_t exp = ((b6 ^ 1) << 7) | (b6 ? 0x7c : 0) | ((imm8 >> 4) & 3);
-        s_[d] = ((imm8 >> 7) << 31) | (exp << 23) | ((imm8 & 15) << 19);
+        s_[d] = vmovImmediate(hw1, hw2);
         return;
       }
       const bool bit7 = hw2 & 0x80;

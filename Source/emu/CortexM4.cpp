@@ -39,6 +39,10 @@
 #include <cmath>
 #if defined(__x86_64__) || defined(__i386__)
 #include <xmmintrin.h>
+#if defined(_MSC_VER)
+#include <immintrin.h>
+#include <intrin.h>
+#endif
 #endif
 
 #include <algorithm>
@@ -82,6 +86,14 @@ inline int clz32(uint32_t x) {
   int n = 0;
   while (!(x & 0x80000000u)) { x <<= 1; ++n; }
   return n;
+}
+
+// Valeur d'un VMOV immédiat (8 bits codant un flottant).
+inline uint32_t vmovImmediate(uint32_t hw1, uint32_t hw2) {
+  const uint32_t imm8 = ((hw1 & 15) << 4) | (hw2 & 15);
+  const uint32_t b6 = (imm8 >> 6) & 1;
+  const uint32_t exp = ((b6 ^ 1) << 7) | (b6 ? 0x7c : 0) | ((imm8 >> 4) & 3);
+  return ((imm8 >> 7) << 31) | (exp << 23) | ((imm8 & 15) << 19);
 }
 
 enum ShiftType { kLSL = 0, kLSR = 1, kASR = 2, kROR = 3, kRRX = 4 };
@@ -152,6 +164,15 @@ CortexM4::CortexM4(size_t flashSize, size_t ramSize, Bus* bus, size_t ccmSize)
       flashSize_(flashSize), ramSize_(ramSize), ccmSize_(ccmSize), bus_(bus) {
   icache_.reset(64);
   dcache_.reset(8);
+  decoded_.assign(flashSize / 2, Decoded { kDecUnknown, 0, 0, 0, 0 });
+}
+
+void CortexM4::flashChanged(uint32_t offset, uint32_t size) {
+  if (offset >= flashSize_) return;
+  const size_t first = offset >> 1;
+  const size_t end = std::min<size_t>(decoded_.size(), (static_cast<size_t>(offset) + size + 1) >> 1);
+  // Une instruction de 32 bits commençant juste avant la zone la touche aussi.
+  for (size_t i = first > 0 ? first - 1 : 0; i < end; ++i) decoded_[i].kind = kDecUnknown;
 }
 
 // --- Mémoire -----------------------------------------------------------------------
@@ -866,9 +887,95 @@ LMENTS_NOINLINE void CortexM4::flashFetchLine(uint32_t line) {
   cycles_ += flashWait_;
 }
 
+// Décode l'instruction de la flash à `offset` pour le chemin rapide.
+LMENTS_NOINLINE void CortexM4::decodeAt(uint32_t offset) {
+  Decoded& dc = decoded_[offset >> 1];
+  dc = Decoded { kDecNormal, 0, 0, 0, 0 };
+  uint16_t v[2];
+  std::memcpy(v, &flash_[offset], 4);
+  const uint32_t hw1 = v[0], hw2 = v[1];
+  // Instructions du coprocesseur flottant (mêmes conditions que exec32 / execCoprocessor).
+  if (hw1 < 0xe800 || (hw1 & 0xec00) != 0xec00 || (hw1 & 0xf000) != 0xe000 || ((hw2 >> 8) & 0xe) != 0xa) return;
+  // Toute autre instruction flottante : le décodage général (exec32) est sauté, et
+  // execCoprocessor fait le reste.
+  dc.kind = kDecFpOther;
+  dc.value = (hw1 << 16) | hw2;
+  if (hw2 & 0x100) return;   // double précision
+  if ((hw1 & 0x0f00) == 0x0e00) {
+    if (hw2 & 0x10) return;  // transferts vers les registres ordinaires
+    const uint32_t group = (hw1 >> 4) & 0xb;
+    const bool op = hw2 & 0x40;
+    dc.d = static_cast<uint8_t>(((hw2 >> 12) << 1) | ((hw1 >> 6) & 1));
+    dc.n = static_cast<uint8_t>(((hw1 & 15) << 1) | ((hw2 >> 7) & 1));
+    dc.m = static_cast<uint8_t>(((hw2 & 15) << 1) | ((hw2 >> 5) & 1));
+    if (group <= 0x3 || group == 0x9 || group == 0xa) { dc.kind = kDecFpArith; dc.value = group | (op ? 0x10u : 0u); return; }
+    if (group == 0xb && !op) { dc.kind = kDecFpMoveImm; dc.value = vmovImmediate(hw1, hw2); return; }
+    if (group == 0xb && (hw1 & 15) == 0 && !(hw2 & 0x80)) { dc.kind = kDecFpMove; return; }
+    return;
+  }
+  const bool p = hw1 & 0x100, u = hw1 & 0x80, w = hw1 & 0x20, load = hw1 & 0x10;
+  if (!p || w) return;       // VLDR / VSTR simples seulement (VLDM, VPUSH... : chemin général)
+  const uint32_t imm = (hw2 & 0xff) << 2;
+  dc.kind = load ? kDecVldr : kDecVstr;
+  dc.d = static_cast<uint8_t>(((hw2 >> 12) << 1) | ((hw1 >> 6) & 1));
+  dc.n = static_cast<uint8_t>(hw1 & 15);
+  dc.value = u ? imm : 0u - imm;
+}
+
+// Exécute une instruction déjà décodée : même déroulement que step() + exec32 +
+// execCoprocessor pour ces instructions de 32 bits, sans le décodage.
+__attribute__((always_inline)) inline void CortexM4::fastStep(const Decoded& dc) {
+  if (flashWait_) {
+    const uint32_t offset = pc_ & 15;
+    if (__builtin_expect(prefetchFlush_ || offset == 0 || offset > 12, 0)) {
+      touchLine(pc_ >> 4);
+      if (offset > 12) touchLine((pc_ >> 4) + 1);
+    }
+  }
+  ++cycles_;
+  ++instructions_;
+  previousAccess_ = pipelinedAccess_;
+  pipelinedAccess_ = false;
+  nextPc_ = pc_ + 4;
+  if (dc.kind == kDecFpOther) {   // même chose que exec32 -> execCoprocessor
+    execCoprocessor(dc.value);
+    pc_ = nextPc_;
+    return;
+  }
+  ++changes_;
+  switch (dc.kind) {
+    case kDecFpArith: fpArith(dc.value & 15, dc.value & 0x10, dc.d, dc.n, dc.m); break;
+    case kDecFpMove: fpMoveRegister(dc.d, dc.m); break;
+    case kDecFpMoveImm:
+      fpLastAt_ = instructions_; fpLastDest_ = 0xffu; fpLastMac_ = false;
+      s_[dc.d] = dc.value;
+      break;
+    case kDecVldr: {
+      const uint32_t base = dc.n == 15 ? ((pc_ + 4) & ~3u) : r_[dc.n];
+      s_[dc.d] = read32(base + dc.value);
+      accessCycle();
+      break;
+    }
+    default: {   // kDecVstr
+      const uint32_t base = dc.n == 15 ? ((pc_ + 4) & ~3u) : r_[dc.n];
+      fpConsume(dc.d);
+      write32(base + dc.value, s_[dc.d]);
+      accessCycle();
+      break;
+    }
+  }
+  pc_ = nextPc_;
+}
+
 LMENTS_FLATTEN void CortexM4::step() {
   uint32_t hw1, hw2 = 0;
   const uint32_t o = pc_ - kFlashBase;
+  // Chemin rapide : instruction déjà décodée, hors bloc IT, unité flottante prête.
+  if (o <= flashSize_ - 4 && !itstate_ && fpReady_ && fastPath_) {
+    const Decoded& dc = decoded_[o >> 1];
+    if (__builtin_expect(dc.kind == kDecUnknown, 0)) decodeAt(o);
+    if (dc.kind >= kDecFpArith) { fastStep(dc); return; }
+  }
   const bool inFlash = o <= flashSize_ - 4;
   if (inFlash) {
     uint16_t v[2];

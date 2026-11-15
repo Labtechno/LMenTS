@@ -6,7 +6,7 @@ if(APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
   set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Architectures macOS" FORCE)
 endif()
 
-project(LMenTS VERSION 0.4.0 LANGUAGES C CXX)
+project(LMenTS VERSION 0.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,8 +25,17 @@ add_library(lments_emu STATIC
 target_include_directories(lments_emu PUBLIC Source/emu Source/hw)
 set_target_properties(lments_emu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # Le calcul flottant doit rester exactement celui qui est écrit (pas de fusion
-# multiplication-addition décidée par le compilateur).
-target_compile_options(lments_emu PRIVATE -O3 -ffp-contract=off)
+# multiplication-addition décidée par le compilateur). L'émulateur utilise des
+# extensions de Clang : sous Windows, il faut clang-cl (Visual Studio, option
+# « -T ClangCL »), pas le compilateur de Microsoft.
+if(MSVC)
+  if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "Sous Windows, compiler avec clang-cl : cmake -T ClangCL ...")
+  endif()
+  target_compile_options(lments_emu PRIVATE /clang:-O3 /clang:-ffp-contract=off)
+else()
+  target_compile_options(lments_emu PRIVATE -O3 -ffp-contract=off)
+endif()
 
 # --- Outils de test sans JUCE (voir tools/) --------------------------------------------------
 if(LMENTS_BUILD_TOOLS)

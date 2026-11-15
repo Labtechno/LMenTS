@@ -6,6 +6,7 @@
 // (elements/drivers) pour le câblage des broches.
 
 #include "ElementsMachine.h"
+#include "SoftFloat.h"
 
 #include <algorithm>
 #include <cstring>
@@ -70,6 +71,7 @@ void ElementsMachine::writeSector(int sector, const uint8_t* data) {
   sectorRange(sector, offset, size);
   if (data) std::memcpy(cpu_.flash() + offset, data, size);
   else std::memset(cpu_.flash() + offset, 0xff, size);
+  cpu_.flashChanged(offset, size);
 }
 
 ElementsMachine::ElementsMachine() : cpu_(kFlashSize, kRamSize, this, kCcmSize) {
@@ -99,15 +101,18 @@ bool ElementsMachine::loadApplication(const uint8_t* data, size_t size) {
   applicationSize_ = size;
   // À la place du bootloader : la remise à zéro saute directement à l'application.
   std::memcpy(flash, data, 8);
+  cpu_.flashChanged(0, kFlashSize);
   return true;
 }
 
 void ElementsMachine::restoreFlash(const uint8_t* data, size_t size) {
   std::memcpy(cpu_.flash(), data, std::min(size, kFlashSize));
+  cpu_.flashChanged(0, kFlashSize);
 }
 
 void ElementsMachine::eraseSettings() {
   std::memset(cpu_.flash() + (kSettingsBase - CortexM4::kFlashBase), 0xff, kSettingsSize);
+  cpu_.flashChanged(kSettingsBase - CortexM4::kFlashBase, kSettingsSize);
 }
 
 void ElementsMachine::powerOn() {
@@ -168,8 +173,9 @@ void ElementsMachine::updateAudioClock() {
     if (div && m && i2sN && i2sR) {
       // Horloge I2S = 8 MHz / m x i2sN / i2sR ; échantillons par seconde = horloge / (frame x div).
       const unsigned __int128 num = static_cast<unsigned __int128>(cpuHz() + 0.5) * frame * div * i2sR * m;
-      const unsigned __int128 den = static_cast<unsigned __int128>(8000000) * i2sN;
-      period = static_cast<uint64_t>((num << 32) / den);
+      const uint64_t den = uint64_t { 8000000 } * i2sN;
+      uint64_t remainder;
+      period = static_cast<uint64_t>(sf::divide128(num << 32, den, remainder));
     }
   }
   if (period == 0 && running) period = kFallbackSamplePeriod << 32;
@@ -367,6 +373,7 @@ void ElementsMachine::flashProgram(uint32_t address, uint32_t value, int size) {
   if (!(flashCr_ & 1) || (flashCr_ & 0x80000000u)) return;   // PG absent ou flash verrouillée
   uint8_t* p = cpu_.flash() + (address - CortexM4::kFlashBase);
   for (int i = 0; i < size; ++i) p[i] &= static_cast<uint8_t>(value >> (8 * i));  // 1 -> 0 seulement
+  cpu_.flashChanged(address - CortexM4::kFlashBase, static_cast<uint32_t>(size));
   ++flashWrites_;
   // 16 µs par écriture (valeur typique de la fiche technique). Le programme, qui
   // s'exécute depuis la flash, est bloqué pendant ce temps.
@@ -389,10 +396,12 @@ void ElementsMachine::flashControl(uint32_t value) {
       uint32_t offset, size;
       sectorRange(static_cast<int>(sector), offset, size);
       std::memset(flash + offset, 0xff, size);
+      cpu_.flashChanged(offset, size);
       seconds = sector < 4 ? erase16[psize] : (sector == 4 ? erase64[psize] : erase128[psize]);
     }
   } else if (value & 4) {   // tout
     std::memset(flash, 0xff, kFlashSize);
+    cpu_.flashChanged(0, kFlashSize);
     seconds = 4 * erase16[psize] + erase64[psize] + 7 * erase128[psize];
   }
   ++flashWrites_;

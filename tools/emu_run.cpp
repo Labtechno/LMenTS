@@ -11,6 +11,10 @@
 // Les statistiques vont sur la sortie d'erreur.
 
 #include <chrono>
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -42,6 +46,9 @@ int main(int argc, char** argv) {
   const uint32_t base = argc > 2 ? static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 16)) : 0;
   const uint64_t limit = (argc > 3 ? std::strtoull(argv[3], nullptr, 10) : 20000) * 1000000ull;
 
+#ifdef _WIN32
+  _setmode(_fileno(stdout), _O_BINARY);   // sorties identiques à celles de Linux et du Mac
+#endif
   TestBus bus;
   CortexM4 cpu(2 * 1024 * 1024, 1024 * 1024, &bus, 64 * 1024);
   bus.cpu = &cpu;

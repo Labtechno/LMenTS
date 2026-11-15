@@ -4,6 +4,8 @@
 //   machine_test <firmware.bin> play <out.wav>  joue quelques notes et écrit le son
 //   machine_test <firmware.bin> pitch           vérifie l'accord : 1 V par octave
 //   machine_test <firmware.bin> speed           vitesse de l'émulateur et charge du processeur émulé
+//   machine_test <firmware.bin> fastpath        le chemin rapide de l'émulateur donne exactement
+//                                                le même son et les mêmes cycles que le chemin normal
 //   machine_test <firmware.bin> cpu [max %]      charge de la puce, bloc par bloc ; avec un maximum :
 //                                                échoue si la pointe le dépasse ou si un bloc manque
 //
@@ -263,6 +265,37 @@ int main(int argc, char** argv) {
       m.run(0.5);
     }
     expect(!m.machine.crashed(), "le processeur tourne");
+  } else if (cmd == "fastpath") {
+    // Deux modules identiques, l'un avec le chemin rapide, l'autre sans, joués de la
+    // même façon : notes, potards qui bougent, entrée audio.
+    Module slow(firmware);
+    slow.machine.cpu().setFastPath(false);
+    uint64_t differences = 0, samples = 0;
+    bool cyclesEqual = true;
+    std::vector<int16_t> in(256);
+    uint32_t seed = 7;
+    for (int k = 0; k < 400; ++k) {   // 3,2 s
+      const bool gate = (k % 100) < 40;
+      for (Module* x : { &m, &slow }) {
+        x->machine.controls.gate = gate;
+        x->pots[hw::kPotGeometry] = 0.2f + 0.6f * static_cast<float>(k) / 400.0f;
+        x->pots[hw::kPotBow] = (k / 100) % 2 ? 0.7f : 0.0f;
+        x->cvs[hw::kCvVOct] = static_cast<float>((k / 50) % 4) * 0.25f;
+      }
+      for (auto& v : in) { seed = seed * 1664525u + 1013904223u; v = (k % 37) < 3 ? static_cast<int16_t>(static_cast<int32_t>(seed) >> 18) : 0; }
+      int16_t l1[256], r1[256], l2[256], r2[256];
+      m.apply(); slow.apply();
+      m.machine.run(in.data(), nullptr, l1, r1, 256);
+      slow.machine.run(in.data(), nullptr, l2, r2, 256);
+      for (int i = 0; i < 256; ++i) differences += (l1[i] != l2[i]) + (r1[i] != r2[i]);
+      samples += 512;
+      if (m.machine.cycles() != slow.machine.cycles() || m.machine.cpu().handlerCycles() != slow.machine.cpu().handlerCycles()) cyclesEqual = false;
+    }
+    std::printf("  %llu echantillons compares, %llu differents ; cycles : %llu et %llu\n",
+                static_cast<unsigned long long>(samples), static_cast<unsigned long long>(differences),
+                static_cast<unsigned long long>(m.machine.cycles()), static_cast<unsigned long long>(slow.machine.cycles()));
+    expect(differences == 0, "chemin rapide : meme son, echantillon par echantillon");
+    expect(cyclesEqual, "chemin rapide : memes cycles, bloc par bloc (jauge et surcharge identiques)");
   } else if (cmd == "cpu") {
     // Réglage le plus lourd : les trois excitateurs, la réverbération, une note tenue
     // très grave (COARSE au minimum), géométrie peu étirée : toutes les résonances
